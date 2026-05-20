@@ -216,6 +216,133 @@ Do not include any other markdown code blocks, backticks, or text in response. J
     }
   });
 
+  // API Route for Day Regeneration
+  app.post("/api/days/:dayId/regenerate", async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API key is missing. Please configure it in Settings." });
+    }
+
+    const dayId = req.params.dayId;
+    const { 
+      trip_id, 
+      constraints_text, 
+      constraint_chips,
+      original_day,
+      destination,
+      budget,
+      vibe_tags,
+      disliked_activities,
+      start_date,
+      end_date
+    } = req.body;
+
+    if (!trip_id) {
+      return res.status(400).json({ error: "trip_id parameter is required." });
+    }
+
+    try {
+      const genAI = new GoogleGenAI({ 
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const chipsString = constraint_chips && constraint_chips.length > 0
+        ? constraint_chips.join(", ")
+        : "None";
+
+      const dislikesString = disliked_activities && disliked_activities.length > 0
+        ? disliked_activities.join("\n")
+        : "None";
+
+      const originalDayJson = original_day ? JSON.stringify(original_day, null, 2) : "Unknown";
+
+      const systemInstruction = `You are an experienced local travel planner who creates realistic, well-paced group itineraries. You will be given a request to REGENERATE only Day ${dayId} of an existing itinerary.
+You must return ONLY a valid JSON object matching the exact schema provided, with no surrounding text, no markdown code fences, and no explanation.
+
+IMPORTANT: Maintain realistic travel times, restaurant operating hours, and sequence activities geographically within the same day so travelers don't crisscross. Keep the total cost similar to the original day’s budget. Match the original style of the activities.`;
+
+      const prompt = `Please regenerate only Day ${dayId} of an itinerary for: "${destination}".
+Original Trip details:
+- Dates: ${start_date} to ${end_date}
+- Vibes: ${vibe_tags ? vibe_tags.join(", ") : "general"}
+- Original budget per person: USD ${budget || "unknown"}
+
+Original dayactivities to replace:
+${originalDayJson}
+
+USER REQUEST FOR REGENERATION:
+"${constraints_text || "Make it more interesting and better structured"}"
+
+SHORTCUT CONSTRAINTS REQUESTED:
+- ${chipsString}
+
+GROUP FEEDBACK / DISLIKED ACTIVITIES FROM VOTING TO AVOID:
+${dislikesString}
+
+CONSTRAINT RULES BASED ON REQUESTED ITEMS:
+- if "cheaper options" is in the constraints: prioritize free/low-cost activities, skip paid experiences
+- if "more food focus" is in the constraints: increase % of food-related activities (e.g. delicious lunch, local bites, unique dinner spots)
+- if "less walking" is in the constraints: reduce transit time, choose nearby key activities
+- if "indoor alternatives" is in the constraints: replace outdoor activities with comparable indoor equivalents
+- if "more adventure" is in the constraints: add active/sport/nature activities, reduce passive sightseeing
+
+Return ONLY a single valid JSON object matching this exact structure for Day ${dayId} (Do not wrap this in any other fields or arrays):
+{
+  "day_number": ${Number(dayId) || 1},
+  "date": "${original_day?.date || ""}",
+  "day_notes": "A brief 1-sentence note summarizing the main theme of this newly adjusted day.",
+  "estimated_day_cost_usd": number,
+  "weather_dependency": "high | medium | low",
+  "activities": [
+    {
+      "id": "day${dayId}_activity_1" (adjust number for each activity sequentially),
+      "name": "string",
+      "description": "string (practical, engaging 2-3 sentences)",
+      "category": "food | sightseeing | activity | transit | accommodation | free_time",
+      "start_time": "HH:MM",
+      "duration_minutes": number,
+      "estimated_cost_usd": number,
+      "neighborhood": "string",
+      "venue_name": "string",
+      "transit_notes": "string",
+      "verify_hours": boolean
+    }
+  ]
+}
+
+Important: Keep activities realistic and concrete. Return ONLY this valid JSON object, with no explanation and no markdown backticks.`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-flash-latest",
+        contents: prompt,
+        config: {
+          systemInstruction,
+          responseMimeType: "application/json",
+        }
+      });
+
+      let text = response.text.trim();
+      if (text.includes("{")) {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start !== -1 && end !== -1) {
+          text = text.substring(start, end + 1);
+        }
+      }
+
+      const regeneratedDay = JSON.parse(text);
+      res.json({ success: true, new_day: regeneratedDay });
+    } catch (error: any) {
+      console.error("Day regeneration error:", error);
+      res.status(500).json({ success: false, error_message: error.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

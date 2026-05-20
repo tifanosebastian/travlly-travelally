@@ -88,6 +88,13 @@ service cloud.firestore {
                     );
       
       allow delete: if isValidId(tripId) && (existing().ownerId == "anonymous" || isOwner(existing()));
+
+      match /itinerary_days/{dayId} {
+        allow read, write: if isValidId(tripId);
+      }
+      match /day_history/{historyId} {
+        allow read, write: if isValidId(tripId);
+      }
     }
 
     // Activity Votes block to handle viewer liking/disliking activities
