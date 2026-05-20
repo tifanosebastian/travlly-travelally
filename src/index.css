@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", serif;
+  
+  --color-brand-teal: #1A6B7A;
+  --color-brand-coral: #E87E5C;
+  --color-brand-sand: #FAF7F2;
+  --color-brand-accent: #FFCB77;
+}
+
+body {
+  @apply antialiased bg-brand-sand text-brand-teal selection:bg-brand-coral/30 min-h-screen;
+}
+
+/* Custom shadow for cards */
+.shadow-soft {
+  shadow: 0 10px 30px -10px rgba(26, 107, 122, 0.1);
+}

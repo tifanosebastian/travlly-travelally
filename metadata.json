@@ -1,0 +1,8 @@
+{
+  "name": "Travlly",
+  "description": "A refined travel ally that transforms your vibes into bespoke, AI-crafted itineraries, shared seamlessly with your group.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

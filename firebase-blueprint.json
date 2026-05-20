@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "Trip": {
+      "title": "Trip",
+      "description": "Represents a group travel trip.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "destination": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "groupSize": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "budgetPerPerson": { "type": "number" },
+        "vibeTags": { 
+          "type": "array", 
+          "items": { "type": "string" },
+          "minItems": 1,
+          "maxItems": 4
+        },
+        "pace": { "type": "string", "enum": ["Relaxed", "Balanced", "Packed"] },
+        "notes": { "type": "string" },
+        "itinerary": { "type": "object" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "shareToken": { "type": "string" },
+        "sharedEmails": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 20
+        }
+      },
+      "required": ["destination", "startDate", "endDate", "groupSize", "budgetPerPerson", "vibeTags", "pace", "createdAt", "updatedAt"]
+    },
+    "ActivityVote": {
+      "title": "ActivityVote",
+      "description": "Represents a vote (like or dislike) cast by a viewer on an itinerary activity.",
+      "type": "object",
+      "properties": {
+        "activity_id": { "type": "string" },
+        "trip_id": { "type": "string" },
+        "voter_id": { "type": "string" },
+        "vote_type": { "type": "string", "enum": ["like", "dislike"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["activity_id", "trip_id", "voter_id", "vote_type", "created_at"]
+    }
+  },
+  "firestore": {
+    "/trips/{tripId}": {
+      "schema": "Trip",
+      "description": "User created travel trips."
+    },
+    "/activity_votes/{voteId}": {
+      "schema": "ActivityVote",
+      "description": "Viewer votes on activities."
+    }
+  }
+}

@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.ownerId == request.auth.uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Trips collection
+    match /trips/{tripId} {
+      function isValidTrip(data) {
+        let hasRequiredFields = data.keys().hasAll(['destination', 'startDate', 'endDate', 'groupSize', 'budgetPerPerson', 'vibeTags', 'pace', 'ownerId', 'createdAt', 'updatedAt', 'shareToken']);
+        // Exact field check to prevent shadow fields (Pillar 2)
+        // Fields: 11 required + up to 3 optional (notes, sharedEmails, itinerary)
+        let totalKeys = data.keys().size();
+        let validKeys = totalKeys >= 11 && totalKeys <= 14;
+        
+        let validTypes = data.destination is string && data.destination.size() >= 3 && data.destination.size() <= 100 &&
+                         data.startDate is string && data.startDate.size() == 10 &&
+                         data.endDate is string && data.endDate.size() == 10 &&
+                         data.groupSize is int && data.groupSize >= 1 && data.groupSize <= 12 &&
+                         data.budgetPerPerson is number && data.budgetPerPerson >= 200 && data.budgetPerPerson <= 10000 &&
+                         data.vibeTags is list && data.vibeTags.size() >= 1 && data.vibeTags.size() <= 4 &&
+                         data.vibeTags[0] is string && // Pillar 5: Type check first element
+                         data.pace in ['Relaxed', 'Balanced', 'Packed'] &&
+                         data.ownerId is string && data.ownerId.size() <= 128 &&
+                         data.shareToken is string && data.shareToken.size() == 32 &&
+                         (!('notes' in data) || (data.notes is string && data.notes.size() <= 600)) &&
+                         (!('sharedEmails' in data) || (data.sharedEmails is list && data.sharedEmails.size() <= 20)) &&
+                         (!('itinerary' in data) || (data.itinerary is map));
+        
+        return hasRequiredFields && validKeys && validTypes;
+      }
+
+      // Allow get if shareToken matches or owner
+      allow get: if isValidId(tripId) && (
+        resource.data.shareToken != null || 
+        isOwner(resource.data)
+      );
+      
+      // Pillar 8: Secure List Queries
+      allow list: if isSignedIn() && (
+        resource.data.ownerId == request.auth.uid || 
+        (resource.data.sharedEmails != null && request.auth.token.email in resource.data.sharedEmails)
+      );
+      
+      allow create: if isValidId(tripId) && 
+                    isValidTrip(incoming()) &&
+                    incoming().ownerId == (isSignedIn() ? request.auth.uid : "anonymous") &&
+                    incoming().createdAt == request.time &&
+                    incoming().updatedAt == request.time &&
+                    !('itinerary' in incoming());
+      
+      allow update: if isValidId(tripId) && 
+                    isValidTrip(incoming()) &&
+                    incoming().ownerId == existing().ownerId &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().updatedAt == request.time &&
+                    (
+                      // Action: Add Itinerary (Server proxy calls usually update this)
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['itinerary', 'updatedAt'])) ||
+                      // Action: Edit metadata (only owner/creator)
+                      ((existing().ownerId == "anonymous" || isOwner(existing())) && 
+                       incoming().diff(existing()).affectedKeys().hasOnly(['destination', 'startDate', 'endDate', 'groupSize', 'budgetPerPerson', 'vibeTags', 'pace', 'notes', 'updatedAt'])) ||
+                      // Action: Share (only owner)
+                      (isOwner(existing()) && incoming().diff(existing()).affectedKeys().hasOnly(['sharedEmails', 'updatedAt']))
+                    );
+      
+      allow delete: if isValidId(tripId) && (existing().ownerId == "anonymous" || isOwner(existing()));
+    }
+
+    // Activity Votes block to handle viewer liking/disliking activities
+    match /activity_votes/{voteId} {
+      function isValidVote(data, id) {
+        let hasRequiredFields = data.keys().hasAll(['activity_id', 'trip_id', 'voter_id', 'vote_type', 'created_at']);
+        let totalKeys = data.keys().size();
+        let validKeys = totalKeys == 5;
+        
+        let validTypes = data.activity_id is string && data.activity_id.size() >= 1 && data.activity_id.size() <= 100 &&
+                         data.trip_id is string && data.trip_id.size() >= 3 && data.trip_id.size() <= 128 &&
+                         data.voter_id is string && data.voter_id.size() >= 10 && data.voter_id.size() <= 128 &&
+                         data.vote_type in ['like', 'dislike'] &&
+                         data.created_at is timestamp;
+                         
+        let matchesId = id == data.voter_id + '_' + data.activity_id;
+        
+        return hasRequiredFields && validKeys && validTypes && matchesId;
+      }
+
+      allow get: if isValidId(voteId);
+      allow list: if resource.data.trip_id is string;
+      allow create, update: if isValidId(voteId) && 
+                            isValidVote(incoming(), voteId) &&
+                            incoming().created_at == request.time;
+      allow delete: if isValidId(voteId);
+    }
+  }
+}
