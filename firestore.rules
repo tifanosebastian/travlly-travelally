@@ -32,9 +32,9 @@ service cloud.firestore {
       function isValidTrip(data) {
         let hasRequiredFields = data.keys().hasAll(['destination', 'startDate', 'endDate', 'groupSize', 'budgetPerPerson', 'vibeTags', 'pace', 'ownerId', 'createdAt', 'updatedAt', 'shareToken']);
         // Exact field check to prevent shadow fields (Pillar 2)
-        // Fields: 11 required + up to 3 optional (notes, sharedEmails, itinerary)
+        // Fields: 11 required + up to 5 optional (notes, sharedEmails, itinerary, local_lingo, trip_logistics)
         let totalKeys = data.keys().size();
-        let validKeys = totalKeys >= 11 && totalKeys <= 14;
+        let validKeys = totalKeys >= 11 && totalKeys <= 16;
         
         let validTypes = data.destination is string && data.destination.size() >= 3 && data.destination.size() <= 100 &&
                          data.startDate is string && data.startDate.size() == 10 &&
@@ -48,7 +48,9 @@ service cloud.firestore {
                          data.shareToken is string && data.shareToken.size() == 32 &&
                          (!('notes' in data) || (data.notes is string && data.notes.size() <= 600)) &&
                          (!('sharedEmails' in data) || (data.sharedEmails is list && data.sharedEmails.size() <= 20)) &&
-                         (!('itinerary' in data) || (data.itinerary is map));
+                         (!('itinerary' in data) || (data.itinerary is map)) &&
+                         (!('local_lingo' in data) || (data.local_lingo is map)) &&
+                         (!('trip_logistics' in data) || (data.trip_logistics is map));
         
         return hasRequiredFields && validKeys && validTypes;
       }
@@ -78,8 +80,8 @@ service cloud.firestore {
                     incoming().createdAt == existing().createdAt &&
                     incoming().updatedAt == request.time &&
                     (
-                      // Action: Add Itinerary (Server proxy calls usually update this)
-                      (incoming().diff(existing()).affectedKeys().hasOnly(['itinerary', 'updatedAt'])) ||
+                      // Action: Add Itinerary / Cache Local Lingo (Server proxy or viewer triggers)
+                      (incoming().diff(existing()).affectedKeys().hasOnly(['itinerary', 'local_lingo', 'updatedAt'])) ||
                       // Action: Edit metadata (only owner/creator)
                       ((existing().ownerId == "anonymous" || isOwner(existing())) && 
                        incoming().diff(existing()).affectedKeys().hasOnly(['destination', 'startDate', 'endDate', 'groupSize', 'budgetPerPerson', 'vibeTags', 'pace', 'notes', 'updatedAt'])) ||
@@ -121,6 +123,16 @@ service cloud.firestore {
                             isValidVote(incoming(), voteId) &&
                             incoming().created_at == request.time;
       allow delete: if isValidId(voteId);
+    }
+
+    // Global Google Places API cache rules
+    match /google_places_cache/{cacheKey} {
+      allow read: if true;
+      allow create, update: if cacheKey is string && 
+                            cacheKey.size() <= 256 && 
+                            incoming().query is string && 
+                            incoming().verification_data is map &&
+                            incoming().cached_at is string;
     }
   }
 }

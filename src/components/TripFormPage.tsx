@@ -5,6 +5,7 @@ import { ArrowLeft, Sparkles, MapPin, Calendar, Users, DollarSign, Check, Info, 
 import { setDoc, collection, serverTimestamp, updateDoc, doc } from "firebase/firestore";
 import { db, auth, handleFirestoreError, OperationType } from "../lib/firebase";
 import { generateShareToken } from "../lib/utils";
+import Footer from "./Footer";
 
 const VIBE_OPTIONS = ["Foodie", "Adventure", "Culture", "Relaxation", "Nature", "Nightlife"];
 const PACES = [
@@ -35,6 +36,14 @@ export default function TripFormPage() {
     vibeTags: [] as string[],
     pace: "Balanced",
     notes: "",
+    hasFlight: false,
+    airportName: "",
+    flightArrivalDateTime: "",
+    flightDepartureDateTime: "",
+    hasAccommodation: false,
+    accommodationName: "",
+    accommodationLocation: "",
+    accommodationType: "Hotel",
   });
 
   useEffect(() => {
@@ -61,7 +70,7 @@ export default function TripFormPage() {
 
     if (!formData.startDate) {
       newErrors.startDate = "Start date is required.";
-    } else if (start <= now) {
+    } else if (start <= now && start.toDateString() !== now.toDateString()) {
       newErrors.startDate = "Start date must be in the future.";
     } else if (start > maxFuture) {
       newErrors.startDate = "Start date must be within 12 months.";
@@ -94,6 +103,35 @@ export default function TripFormPage() {
       newErrors.notes = "Notes must be under 500 characters.";
     }
 
+    // Flight arrival/departure validation
+    if (formData.hasFlight) {
+      const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+      if (!formData.flightArrivalDateTime) {
+        newErrors.flightArrivalDateTime = "Flight arrival time is required.";
+      } else if (!timeRegex.test(formData.flightArrivalDateTime)) {
+        newErrors.flightArrivalDateTime = "Use HH:MM 24-hour format (e.g., 14:30). Hours must be 00-23, mins 00-59.";
+      }
+
+      if (!formData.flightDepartureDateTime) {
+        newErrors.flightDepartureDateTime = "Flight departure time is required.";
+      } else if (!timeRegex.test(formData.flightDepartureDateTime)) {
+        newErrors.flightDepartureDateTime = "Use HH:MM 24-hour format (e.g., 20:00). Hours must be 00-23, mins 00-59.";
+      }
+
+      if (
+        formData.flightArrivalDateTime && 
+        formData.flightDepartureDateTime && 
+        timeRegex.test(formData.flightArrivalDateTime) && 
+        timeRegex.test(formData.flightDepartureDateTime) &&
+        formData.startDate === formData.endDate
+      ) {
+        if (formData.flightDepartureDateTime <= formData.flightArrivalDateTime) {
+          newErrors.flightDepartureDateTime = "Flight departure must be after flight arrival.";
+        }
+      }
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -114,11 +152,30 @@ export default function TripFormPage() {
     setLoading(true);
     const shareToken = generateShareToken();
     try {
+      const trip_logistics = {
+        has_flight: formData.hasFlight,
+        airport_name: formData.hasFlight ? formData.airportName || null : null,
+        flight_arrival_datetime: (formData.hasFlight && formData.flightArrivalDateTime) ? `${formData.startDate}T${formData.flightArrivalDateTime}:00.000Z` : null,
+        flight_departure_datetime: (formData.hasFlight && formData.flightDepartureDateTime) ? `${formData.endDate}T${formData.flightDepartureDateTime}:00.000Z` : null,
+        has_accommodation: formData.hasAccommodation,
+        accommodation_name: formData.hasAccommodation ? formData.accommodationName || null : null,
+        accommodation_location: formData.hasAccommodation ? formData.accommodationLocation || null : null,
+        accommodation_type: formData.hasAccommodation ? formData.accommodationType || null : null
+      };
+
       // 1. Save to Firestore
       const tripDocRef = doc(db, "trips", shareToken);
       try {
         await setDoc(tripDocRef, {
-          ...formData,
+          destination: formData.destination,
+          startDate: formData.startDate,
+          endDate: formData.endDate,
+          groupSize: formData.groupSize,
+          budgetPerPerson: formData.budgetPerPerson,
+          vibeTags: formData.vibeTags,
+          pace: formData.pace,
+          notes: formData.notes,
+          trip_logistics,
           ownerId: auth.currentUser?.uid || "anonymous",
           shareToken,
           createdAt: serverTimestamp(),
@@ -128,26 +185,51 @@ export default function TripFormPage() {
         handleFirestoreError(err, OperationType.CREATE, `trips/${shareToken}`);
       }
 
-      // 2. Call Gemini via Proxy
+      // 2. Call Gemini via Proxy for both Itinerary and Local Lingo
       const nights = Math.ceil((new Date(formData.endDate).getTime() - new Date(formData.startDate).getTime()) / (1000 * 60 * 60 * 24));
       const brief = `Trip Brief: Destination: ${formData.destination}. Dates: ${formData.startDate} to ${formData.endDate} (${nights} nights). Group size: ${formData.groupSize}. Budget per person: USD ${formData.budgetPerPerson}. Vibe tags (weighted): ${formData.vibeTags.join(", ")}. Pace: ${formData.pace}. Additional notes: ${formData.notes || 'none'}. Generate an itinerary`;
 
-      const response = await fetch("/api/generate-itinerary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tripBrief: brief }),
-      });
+      const [itineraryRes, lingoRes] = await Promise.all([
+        fetch("/api/generate-itinerary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tripBrief: brief, trip_logistics }),
+        }),
+        fetch("/api/generate-lingo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ destination: formData.destination }),
+        }).catch((err) => {
+          console.error("Non-blocking lingo generation error:", err);
+          return null;
+        })
+      ]);
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
+      if (!itineraryRes.ok) {
+        const errData = await itineraryRes.json().catch(() => ({}));
         throw new Error(errData.error || "Failed to generate itinerary");
       }
-      const itinerary = await response.json();
+      const itinerary = await itineraryRes.json();
 
-      // 3. Update Firestore with itinerary
+      let local_lingo = null;
+      if (lingoRes && lingoRes.ok) {
+        try {
+          const lingoData = await lingoRes.json();
+          local_lingo = {
+            ...lingoData,
+            generated_at: new Date().toISOString(),
+            language: "en"
+          };
+        } catch (e) {
+          console.error("Failed to parse lingo json", e);
+        }
+      }
+
+      // 3. Update Firestore with itinerary and lingo
       try {
         await updateDoc(tripDocRef, {
           itinerary,
+          local_lingo,
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
@@ -204,7 +286,9 @@ export default function TripFormPage() {
           <span className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-teal/20">Planning Mode</span>
           <span className="text-sm font-serif italic text-brand-teal">Your Next Adventure</span>
         </div>
-        <div className="w-12" />
+        <div className="text-right">
+          <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.6</span>
+        </div>
       </div>
 
       <main className="max-w-xl mx-auto px-6">
@@ -310,7 +394,7 @@ export default function TripFormPage() {
                 <div className="relative">
                   <input
                     type="number"
-                    className="w-full bg-white border-2 border-brand-teal/[0.03] rounded-2xl p-5 text-xl font-bold text-brand-teal focus:outline-none focus:border-brand-coral/30 shadow-sm transition-all"
+                    className="w-full bg-white border-2 border-brand-teal/[0.03] rounded-2xl p-5 text-xl font-bold text-brand-teal focus:outline-none focus:border-brand-coral/30 shadow-sm transition-all no-spinners"
                     value={formData.budgetPerPerson}
                     onChange={(e) => setFormData({ ...formData, budgetPerPerson: parseInt(e.target.value) || 0 })}
                   />
@@ -357,7 +441,7 @@ export default function TripFormPage() {
           <section className="space-y-6">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-brand-teal/5 flex items-center justify-center text-[10px] font-black text-brand-teal">05</div>
-              <label className="text-xs font-black uppercase tracking-[0.2em] text-brand-teal/40">Preferred Pace</label>
+              <label className="text-xs font-black uppercase tracking-[0.2em] text-brand-teal/40">Preferred Pace of Activities</label>
             </div>
             <div className="grid grid-cols-3 gap-4">
               {PACES.map((p) => (
@@ -393,6 +477,168 @@ export default function TripFormPage() {
             {errors.notes && <p className="text-red-500 text-[10px] font-black uppercase tracking-widest">{errors.notes}</p>}
           </section>
 
+          {/* Travel Details (Optional) */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-brand-teal/5 flex items-center justify-center text-[10px] font-black text-brand-teal">07</div>
+              <label className="text-xs font-black uppercase tracking-[0.2em] text-brand-teal/40">Travel Details (Optional)</label>
+            </div>
+            
+            <div className="space-y-6 bg-[#FAF7F2] border border-brand-teal/5 rounded-[2rem] p-8">
+              {/* Flight Section */}
+              <div className="space-y-4">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="w-5 h-5 rounded border-brand-teal/20 text-brand-coral focus:ring-brand-coral transition"
+                    checked={formData.hasFlight}
+                    onChange={(e) => setFormData({ ...formData, hasFlight: e.target.checked })}
+                  />
+                  <span className="text-sm font-bold text-brand-teal">I have a flight booked</span>
+                </label>
+
+                {formData.hasFlight && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="space-y-4 pl-8 pt-2 overflow-hidden"
+                  >
+                    <div>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-2">Airport Name</label>
+                      <input
+                        type="text"
+                        maxLength={100}
+                        placeholder="e.g., Ngurah Rai Airport, Denpasar"
+                        className="w-full bg-white border border-brand-teal/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-brand-coral/30"
+                        value={formData.airportName}
+                        onChange={(e) => setFormData({ ...formData, airportName: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-1">Flight Arrival Time (24h)</label>
+                        <span className="block text-[9px] text-brand-teal/40 mb-2">Format: HH:MM (e.g., 08:00, 14:30, 20:00)</span>
+                        <input
+                          type="text"
+                          maxLength={5}
+                          placeholder="e.g., 14:30"
+                          className="w-full bg-white border border-brand-teal/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-brand-coral/30 placeholder-brand-teal/20"
+                          value={formData.flightArrivalDateTime}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/[^0-9:]/g, "");
+                            // Simple auto-formatting of HH:MM
+                            let digits = val.replace(/\D/g, "");
+                            if (digits.length > 4) digits = digits.slice(0, 4);
+                            const formatted = digits.length <= 2 ? digits : `${digits.slice(0, 2)}:${digits.slice(2)}`;
+                            setFormData({ ...formData, flightArrivalDateTime: formatted });
+                          }}
+                        />
+                        {errors.flightArrivalDateTime && (
+                          <span className="text-red-500 text-[9px] font-black uppercase block mt-1">{errors.flightArrivalDateTime}</span>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-1">Flight Departure Time (24h)</label>
+                        <span className="block text-[9px] text-brand-teal/40 mb-2">Format: HH:MM (e.g., 08:00, 14:30, 20:00)</span>
+                        <input
+                          type="text"
+                          maxLength={5}
+                          placeholder="e.g., 20:00"
+                          className="w-full bg-white border border-brand-teal/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-brand-coral/30 placeholder-brand-teal/20"
+                          value={formData.flightDepartureDateTime}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/[^0-9:]/g, "");
+                            // Simple auto-formatting of HH:MM
+                            let digits = val.replace(/\D/g, "");
+                            if (digits.length > 4) digits = digits.slice(0, 4);
+                            const formatted = digits.length <= 2 ? digits : `${digits.slice(0, 2)}:${digits.slice(2)}`;
+                            setFormData({ ...formData, flightDepartureDateTime: formatted });
+                          }}
+                        />
+                        {errors.flightDepartureDateTime && (
+                          <span className="text-red-500 text-[9px] font-black uppercase block mt-1">{errors.flightDepartureDateTime}</span>
+                        )}
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+
+              <hr className="border-brand-teal/5" />
+
+              {/* Hotel / Accommodation Section */}
+              <div className="space-y-4">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="w-5 h-5 rounded border-brand-teal/20 text-brand-coral focus:ring-brand-coral transition"
+                    checked={formData.hasAccommodation}
+                    onChange={(e) => setFormData({ ...formData, hasAccommodation: e.target.checked })}
+                  />
+                  <span className="text-sm font-bold text-brand-teal">I have accommodation booked</span>
+                </label>
+
+                {formData.hasAccommodation && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="space-y-4 pl-8 pt-2 overflow-hidden"
+                  >
+                    <div>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-2">Hotel/Accommodation Name</label>
+                      <input
+                        type="text"
+                        maxLength={100}
+                        placeholder="e.g., Hotel Bali Beach Resort"
+                        className="w-full bg-white border border-brand-teal/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-brand-coral/30"
+                        value={formData.accommodationName}
+                        onChange={(e) => setFormData({ ...formData, accommodationName: e.target.value })}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-2">Location/Neighborhood</label>
+                      <input
+                        type="text"
+                        maxLength={100}
+                        placeholder="e.g., Kuta Beach, Bali"
+                        className="w-full bg-white border border-brand-teal/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-brand-coral/30"
+                        value={formData.accommodationLocation}
+                        onChange={(e) => setFormData({ ...formData, accommodationLocation: e.target.value })}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-brand-teal/45 mb-2">Accommodation Type</label>
+                      <div className="flex gap-2 flex-wrap">
+                        {["Hotel", "Airbnb", "Hostel", "Other"].map((type) => {
+                          const isSelected = formData.accommodationType === type;
+                          return (
+                            <button
+                              key={type}
+                              type="button"
+                              onClick={() => setFormData({ ...formData, accommodationType: type })}
+                              className={`px-4 py-2 rounded-xl text-xs font-bold border transition ${
+                                isSelected
+                                  ? "bg-brand-teal text-white border-brand-teal shadow-md shadow-brand-teal/15"
+                                  : "bg-white text-brand-teal/60 border-brand-teal/10 hover:border-brand-teal/20"
+                              }`}
+                            >
+                              {type}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+            </div>
+          </section>
+
           {errors.submit && <div className="bg-red-50 text-red-600 p-6 rounded-[2rem] text-sm font-bold border border-red-100 flex items-center gap-4 animate-pulse"><AlertCircle className="w-6 h-6 flex-shrink-0" /> {errors.submit}</div>}
 
           <motion.button
@@ -406,6 +652,10 @@ export default function TripFormPage() {
           </motion.button>
         </form>
       </main>
+
+      <div className="max-w-xl mx-auto px-6 mt-12 pb-10">
+        <Footer />
+      </div>
     </div>
   );
 }

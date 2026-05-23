@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { collection, query, where, getDocs, getDoc, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, updateDoc } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType, auth } from "../lib/firebase";
 import { MapPin, Calendar, Clock, DollarSign, ArrowLeft, AlertCircle, Share2, Sparkles, Plane, LogOut, Sun, Cloud, CloudRain, Snowflake, Wind, Thermometer, Shirt, Briefcase, ChevronDown, ChevronUp, ThumbsUp, ThumbsDown, RotateCw, TrendingUp, Check } from "lucide-react";
+import Footer from "./Footer";
 
 export default function TripDetailsPage() {
   const { shareToken } = useParams();
@@ -23,11 +24,20 @@ export default function TripDetailsPage() {
   const [selectedRegenDay, setSelectedRegenDay] = useState<number | null>(null);
   const [regenText, setRegenText] = useState("");
   const [regenChips, setRegenChips] = useState<string[]>([]);
+  const [activitiesToRemove, setActivitiesToRemove] = useState<number[]>([]);
+  const [additionalActivities, setAdditionalActivities] = useState<number>(0);
+  const [regenWarningAllRemoved, setRegenWarningAllRemoved] = useState(false);
   const [regeneratingLoading, setRegeneratingLoading] = useState(false);
   const [rotatingMessage, setRotatingMessage] = useState("");
   const [regenError, setRegenError] = useState<string | null>(null);
   const [regenAttempts, setRegenAttempts] = useState<{ [dayNum: number]: number }>({});
   const [successToast, setSuccessToast] = useState<string | null>(null);
+
+  const originalRegenDay = selectedRegenDay !== null && trip
+    ? (itineraryDays.find((d: any) => d.id === selectedRegenDay.toString() || d.day_number === selectedRegenDay) || 
+       trip.itinerary?.days?.find((d: any) => d.day_number === selectedRegenDay))
+    : null;
+  const currentDayActivities = originalRegenDay?.activities || [];
 
   // Group Feedback Summary states
   const [feedbackDaysExpanded, setFeedbackDaysExpanded] = useState(false);
@@ -50,6 +60,18 @@ export default function TripDetailsPage() {
   const [selectedHistoryDay, setSelectedHistoryDay] = useState<any>(null);
   const [copiedActivityId, setCopiedActivityId] = useState<string | null>(null);
   const [isOrganizer, setIsOrganizer] = useState(false);
+
+  // Local Lingo Guide states
+  const [localLingo, setLocalLingo] = useState<any>(null);
+  const [lingoLoading, setLingoLoading] = useState(false);
+  const [lingoSectionsExpanded, setLingoSectionsExpanded] = useState<{[key: string]: boolean}>({
+    phrases: true, // Expanded by default
+    slang: false,
+    tips: false
+  });
+
+  // Background venue verification state
+  const [verifyingActivityIds, setVerifyingActivityIds] = useState<Record<string, boolean>>({});
 
   // Rotating loading message timer
   useEffect(() => {
@@ -187,6 +209,291 @@ export default function TripDetailsPage() {
     fetchWeather();
   }, [trip]);
 
+  // Background Google Places Venue Verification Hook
+  useEffect(() => {
+    if (!trip?.id || loading || !trip?.itinerary) return;
+
+    const trip_metadata = trip.itinerary.trip_metadata || {};
+    const destination = trip.destination || trip_metadata.destination_resolved || "";
+    const days = trip.itinerary.days || [];
+
+    // Find all activities across all days that have venue_name but no google_places_verification in Firestore
+    const pending: { day: any; activity: any; activityId: string }[] = [];
+
+    // Scan rendered activities using the same logic as the renderedDays list
+    days.forEach((origDay: any) => {
+      const subDoc = itineraryDays.find(d => d.id === origDay.day_number.toString() || d.day_number === origDay.day_number);
+      const dayActivities = subDoc ? subDoc.activities : origDay.activities;
+
+      (dayActivities || []).forEach((act: any, aIdx: number) => {
+        const actId = `${origDay.day_number}_${aIdx}`;
+        if (act.venue_name && !act.google_places_verification && verifyingActivityIds[actId] === undefined) {
+          pending.push({ day: origDay, activity: act, activityId: actId });
+        }
+      });
+    });
+
+    if (pending.length === 0) return;
+
+    // Process the first pending activity sequentially to optimize cost and throttle rate limits
+    const nextToVerify = pending[0];
+    const { day, activity, activityId } = nextToVerify;
+
+    const runVerification = async () => {
+      // Mark as verifying in React state to avoid duplicate processing
+      setVerifyingActivityIds(prev => ({ ...prev, [activityId]: true }));
+
+      console.log(`[Verification] Validating activity: "${activity.venue_name}" (${activityId})`);
+
+      try {
+        const cacheKey = `${activity.venue_name}_${activity.neighborhood || ""}_${destination}`
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "_");
+
+        let verifiedData = null;
+        let activityToUpdate = null;
+        let shouldRemoveActivity = false;
+
+        // Step 1: Query global Firestore google_places_cache collection for cost optimization
+        try {
+          const cacheRef = doc(db, "google_places_cache", cacheKey);
+          const cacheSnap = await getDoc(cacheRef);
+          if (cacheSnap.exists()) {
+            console.log(`[Verification] Cache Hit for: "${activity.venue_name}"`);
+            const cached = cacheSnap.data();
+            if (cached && cached.verification_data) {
+              verifiedData = cached.verification_data;
+              if (cached.new_activity) {
+                activityToUpdate = cached.new_activity;
+              }
+              if (cached.was_removed) {
+                shouldRemoveActivity = true;
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Cache read error (non-blocking):", err);
+        }
+
+        // Step 2: Query secure server-side verification proxy api if cache-miss occurred
+        if (!verifiedData) {
+          console.log(`[Verification] Cache Miss for: "${activity.venue_name}". Fetching from proxy...`);
+          const response = await fetch("/api/places/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              venue_name: activity.venue_name,
+              neighborhood: activity.neighborhood || "",
+              destination: destination,
+              activity: activity
+            })
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            if (result.was_replaced && result.new_activity) {
+              // Option A: replace activity with the new shiny one
+              verifiedData = result.google_places_verification || {
+                verified: false,
+                reason: result.reason || "not_found",
+                verified_at: new Date().toISOString()
+              };
+              activityToUpdate = result.new_activity;
+            } else if (result.was_removed) {
+              // Option B: Remove activity from the list
+              verifiedData = result.google_places_verification || {
+                verified: false,
+                reason: result.reason || "not_found",
+                verified_at: new Date().toISOString()
+              };
+              shouldRemoveActivity = true;
+            } else if (result.verified && result.data) {
+              verifiedData = result.data;
+            } else {
+              // Mark as unverified to prevent repeat attempts
+              verifiedData = {
+                verified: false,
+                reason: "not_found",
+                verified_at: new Date().toISOString(),
+                verified_by: "google_places_api_not_found"
+              };
+            }
+
+            // Write verification result to global cache
+            try {
+              await setDoc(doc(db, "google_places_cache", cacheKey), {
+                query: `${activity.venue_name} ${activity.neighborhood || ""} ${destination}`,
+                verification_data: verifiedData,
+                new_activity: activityToUpdate || null,
+                was_removed: shouldRemoveActivity || null,
+                cached_at: new Date().toISOString()
+              });
+            } catch (err) {
+              console.error("Cache write error (non-blocking):", err);
+            }
+          } else {
+            throw new Error(`Proxy verification returned non-ok status: ${response.status}`);
+          }
+        }
+
+        // Step 3: Write verification credentials back to the itinerary_days subcollection
+        if (verifiedData) {
+          const dayIdStr = day.day_number.toString();
+          const subDocRef = doc(db, "trips", trip.id, "itinerary_days", dayIdStr);
+          const existingSubDocSnap = await getDoc(subDocRef);
+
+          let updatedActivities = [];
+          
+          if (existingSubDocSnap.exists()) {
+            const data = existingSubDocSnap.data();
+            const currentActivities = data.activities || [];
+            
+            if (activityToUpdate) {
+              updatedActivities = [];
+              currentActivities.forEach((act: any, idx: number) => {
+                if (idx === parseInt(activityId.split("_")[1], 10)) {
+                  // Keep BOTH!
+                  // 1. The original activity marked as closed/replaced
+                  const closedActivity = {
+                    ...act,
+                    activity_id: activityId,
+                    google_places_verification: verifiedData
+                  };
+                  updatedActivities.push(closedActivity);
+                  
+                  // 2. The new replacement activity
+                  updatedActivities.push(activityToUpdate);
+                } else {
+                  updatedActivities.push(act);
+                }
+              });
+            } else if (shouldRemoveActivity) {
+              updatedActivities = currentActivities.filter((act: any, idx: number) => {
+                return idx !== parseInt(activityId.split("_")[1], 10);
+              });
+            } else {
+              updatedActivities = currentActivities.map((act: any, idx: number) => {
+                if (idx === parseInt(activityId.split("_")[1], 10)) {
+                  return {
+                    ...act,
+                    google_places_verification: verifiedData
+                  };
+                }
+                return act;
+              });
+            }
+
+            await updateDoc(subDocRef, {
+              activities: updatedActivities
+            });
+          } else {
+            // Instantiate day subcollection document
+            const origDay = days.find((d: any) => d.day_number === day.day_number);
+            const currentActivities = [...(origDay?.activities || [])];
+            
+            if (activityToUpdate) {
+              updatedActivities = [];
+              currentActivities.forEach((act: any, idx: number) => {
+                if (idx === parseInt(activityId.split("_")[1], 10)) {
+                  const closedActivity = {
+                    ...act,
+                    activity_id: activityId,
+                    google_places_verification: verifiedData
+                  };
+                  updatedActivities.push(closedActivity);
+                  updatedActivities.push(activityToUpdate);
+                } else {
+                  updatedActivities.push(act);
+                }
+              });
+            } else if (shouldRemoveActivity) {
+              updatedActivities = currentActivities.filter((act: any, idx: number) => {
+                return idx !== parseInt(activityId.split("_")[1], 10);
+              });
+            } else {
+              updatedActivities = currentActivities.map((act: any, idx: number) => {
+                if (idx === parseInt(activityId.split("_")[1], 10)) {
+                  return {
+                    ...act,
+                    google_places_verification: verifiedData
+                  };
+                }
+                return act;
+              });
+            }
+
+            await setDoc(subDocRef, {
+              day_number: day.day_number,
+              date: day.date || "",
+              day_notes: day.day_notes || "",
+              activities: updatedActivities,
+              estimated_day_cost_usd: day.estimated_day_cost_usd || 0,
+              weather_dependency: day.weather_dependency || "low",
+              is_current_version: true,
+              regenerated_at: new Date().toISOString(),
+              regeneration_reason: "Initialized with Places Verification"
+            });
+          }
+        }
+      } catch (err: any) {
+        console.error("Verification operation failure (non-blocking):", err);
+      } finally {
+        // Mark as completed/processed so the scanning pointer can move to next activities
+        setVerifyingActivityIds(prev => ({ ...prev, [activityId]: false }));
+      }
+    };
+
+    runVerification();
+  }, [trip, loading, itineraryDays, verifyingActivityIds]);
+
+  // Fetch or generate Local Lingo Guide
+  useEffect(() => {
+    if (!trip) return;
+    if (trip.local_lingo) {
+      setLocalLingo(trip.local_lingo);
+      return;
+    }
+
+    async function fetchLingo() {
+      setLingoLoading(true);
+      try {
+        const dest = trip.destination || trip.itinerary?.trip_metadata?.destination_resolved || "";
+        if (!dest) {
+          setLingoLoading(false);
+          return;
+        }
+        const res = await fetch("/api/generate-lingo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ destination: dest }),
+        });
+        if (res.ok) {
+          const lingoData = await res.json();
+          const localLingoObj = {
+            ...lingoData,
+            generated_at: new Date().toISOString(),
+            language: "en"
+          };
+          setLocalLingo(localLingoObj);
+          
+          // Cache lingo back to Firestore so we don't regenerate it next time
+          const tripDocRef = doc(db, "trips", trip.id);
+          await updateDoc(tripDocRef, {
+            local_lingo: localLingoObj,
+            updatedAt: serverTimestamp(),
+          }).catch((err) => {
+            console.warn("Failed caching lingo back to Firestore (non-blocking):", err);
+          });
+        }
+      } catch (err) {
+        console.error("Non-blocking on-demand lingo loading error:", err);
+      } finally {
+        setLingoLoading(false);
+      }
+    }
+    fetchLingo();
+  }, [trip]);
+
   const handleVote = async (activityId: string, voteType: "like" | "dislike") => {
     if (!trip?.id || !voterId) return;
 
@@ -230,12 +537,35 @@ export default function TripDetailsPage() {
     if (!selectedRegenDay || !trip) return;
     setRegeneratingLoading(true);
     setRegenError(null);
+    setRotatingMessage("Working some magic...");
 
     const dayNumber = selectedRegenDay;
-    const originalDay = trip.itinerary?.days?.find((d: any) => d.day_number === dayNumber);
+    const originalDay = itineraryDays.find((d: any) => d.id === dayNumber.toString() || d.day_number === dayNumber) ||
+                        trip.itinerary?.days?.find((d: any) => d.day_number === dayNumber);
+    const dayActivities = originalDay?.activities || [];
+
+    // Setup rotating message interval
+    const messages = [
+      "Working some magic...",
+      "Geographic optimizing the route...",
+      "Sequencing recommended spots...",
+      "Formulating day itinerary...",
+      "Checking hours & operations..."
+    ];
+    let msgIdx = 0;
+    const intervalId = setInterval(() => {
+      msgIdx = (msgIdx + 1) % messages.length;
+      setRotatingMessage(messages[msgIdx]);
+    }, 4000);
+
+    // Timeout to show "Still generating..." if it takes > 60 seconds
+    const stillGeneratingTimeoutId = setTimeout(() => {
+      clearInterval(intervalId);
+      setRotatingMessage("Still generating...");
+    }, 60000);
 
     // Collect activities with downvotes on this day to pass as feedback
-    const dayActivitiesWithDislikes = (originalDay?.activities || []).map((act: any, idx: number) => {
+    const dayActivitiesWithDislikes = dayActivities.map((act: any, idx: number) => {
       const activityId = `${dayNumber}_${idx}`;
       const dislikesCount = votes.filter(v => v.activity_id === activityId && v.vote_type === "dislike").length;
       return {
@@ -249,6 +579,12 @@ export default function TripDetailsPage() {
       `- Activity: "${act.name}" has group negative/dislike votes. Reason user wants change: ${regenText || 'General feedback'}`
     );
 
+    // Calculate removed activities names based on raw checked state indices
+    const removedActivityNames = activitiesToRemove.map(idx => {
+      const act = dayActivities[idx];
+      return act ? (act.venue_name || act.name) : "";
+    }).filter(Boolean);
+
     try {
       const response = await fetch(`/api/days/${dayNumber}/regenerate`, {
         method: "POST",
@@ -257,6 +593,8 @@ export default function TripDetailsPage() {
           trip_id: trip.id,
           constraints_text: regenText,
           constraint_chips: regenChips,
+          removed_activities: removedActivityNames,
+          additional_activities_count: additionalActivities,
           original_day: originalDay,
           destination: trip.itinerary.trip_metadata.destination_resolved || trip.destination,
           budget: trip.itinerary.trip_metadata.total_estimated_cost_usd || trip.budgetPerPerson,
@@ -266,6 +604,9 @@ export default function TripDetailsPage() {
           end_date: trip.itinerary.trip_metadata.trip_end_date || trip.endDate
         })
       });
+
+      clearInterval(intervalId);
+      clearTimeout(stillGeneratingTimeoutId);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -280,6 +621,45 @@ export default function TripDetailsPage() {
       const newDayData = resJson.new_day;
 
       // SUCCESS:
+      // Clear votes associated with the old activities that were removed/replaced
+      const activitiesToClearVotes = activitiesToRemove.length > 0
+        ? activitiesToRemove.map(idx => `${dayNumber}_${idx}`)
+        : dayActivities.map((_: any, idx: number) => `${dayNumber}_${idx}`);
+      
+      // 1. Clear local vote UI immediately
+      setVotes(prev => prev.filter(v => !activitiesToClearVotes.includes(v.activity_id)));
+
+      // 2. Delete the votes from Firestore
+      try {
+        const matchingVotesToDelete = votes.filter(v => v.trip_id === trip.id && activitiesToClearVotes.includes(v.activity_id));
+        if (matchingVotesToDelete.length > 0) {
+          const deletePromises = matchingVotesToDelete.map(v => deleteDoc(doc(db, "activity_votes", v.id)));
+          await Promise.all(deletePromises);
+        }
+      } catch (voteDeleteErr) {
+        console.warn("Non-blocking error deleting old votes from Firestore:", voteDeleteErr);
+      }
+
+      // Compute dynamic replacement details for history log
+      const oldActNames = dayActivities.map((a: any) => a.venue_name || a.name);
+      const newActNames = (newDayData.activities || []).map((a: any) => a.venue_name || a.name);
+      
+      const removedList = oldActNames.filter((name: string) => !newActNames.includes(name));
+      const addedList = newActNames.filter((name: string) => !oldActNames.includes(name));
+      
+      let reasonText = "";
+      const parts = [];
+      if (removedList.length > 0) parts.push(`Removed: ${removedList.join(", ")}`);
+      if (addedList.length > 0) parts.push(`Added: ${addedList.join(", ")}`);
+      
+      if (parts.length > 0) {
+        reasonText = parts.join(". ");
+      } else {
+        const chipsList = [...regenChips];
+        if (regenText) chipsList.push(regenText);
+        reasonText = chipsList.length > 0 ? `Adjusted with: ${chipsList.join(", ")}` : "Regenerated Day schedule";
+      }
+
       // Track previous versions to save in subcollection
       const dayIdStr = dayNumber.toString();
       const subDocRef = doc(db, "trips", trip.id, "itinerary_days", dayIdStr);
@@ -292,6 +672,7 @@ export default function TripDetailsPage() {
           version_number: previousVersions.length,
           activities: existingSubDoc.activities,
           day_notes: existingSubDoc.day_notes || "",
+          regeneration_reason: reasonText,
           created_at: existingSubDoc.regenerated_at || new Date().toISOString()
         });
       } else if (originalDay) {
@@ -299,6 +680,7 @@ export default function TripDetailsPage() {
           version_number: 0,
           activities: originalDay.activities,
           day_notes: originalDay.day_notes || "",
+          regeneration_reason: "Original schedule version",
           created_at: trip.createdAt?.seconds ? new Date(trip.createdAt.seconds * 1000).toISOString() : new Date().toISOString()
         });
       }
@@ -313,7 +695,7 @@ export default function TripDetailsPage() {
         weather_dependency: newDayData.weather_dependency || originalDay?.weather_dependency || "low",
         is_current_version: true,
         regenerated_at: new Date().toISOString(),
-        regeneration_reason: regenText || "Regenerated with selected preferences",
+        regeneration_reason: reasonText,
         previous_versions: previousVersions
       });
 
@@ -360,12 +742,16 @@ export default function TripDetailsPage() {
       });
 
       // Show success toast, close modal, and scroll to day
-      setSuccessToast(`Day ${dayNumber} regenerated successfully!`);
-      setTimeout(() => setSuccessToast(null), 4000);
+      const toastMsg = `Day ${dayNumber} regenerated! ${removedList.length} activities removed, ${addedList.length} new ones added.`;
+      setSuccessToast(toastMsg);
+      setTimeout(() => setSuccessToast(null), 5000);
       
       setShowRegenModal(false);
       setRegenText("");
       setRegenChips([]);
+      setActivitiesToRemove([]);
+      setAdditionalActivities(0);
+      setRegenWarningAllRemoved(false);
       setRegenAttempts(prev => ({ ...prev, [dayNumber]: 0 }));
 
       // Smoothly scroll to the regenerated day
@@ -377,6 +763,8 @@ export default function TripDetailsPage() {
       }, 500);
 
     } catch (e: any) {
+      clearInterval(intervalId);
+      clearTimeout(stillGeneratingTimeoutId);
       console.error("Regeneration error:", e);
       const currentAttempts = (regenAttempts[dayNumber] || 0) + 1;
       setRegenAttempts(prev => ({ ...prev, [dayNumber]: currentAttempts }));
@@ -395,6 +783,44 @@ export default function TripDetailsPage() {
     setRegenChips(prev => 
       prev.includes(chip) ? prev.filter(c => c !== chip) : [...prev, chip]
     );
+  };
+
+  const handleOpenRegenModal = async (dayNumber: number) => {
+    setSelectedRegenDay(dayNumber);
+    setActivitiesToRemove([]);
+    setAdditionalActivities(0);
+    setRegenWarningAllRemoved(false);
+    setRegenText("");
+    setRegenChips([]);
+    setRegenError(null);
+    setShowRegenModal(true);
+
+    try {
+      if (!trip?.id) return;
+      const dayIdStr = dayNumber.toString();
+      
+      // Try to fetch from subcollection first
+      const subDocRef = doc(db, "trips", trip.id, "itinerary_days", dayIdStr);
+      const subDocSnap = await getDoc(subDocRef);
+      
+      if (subDocSnap.exists()) {
+        const freshDayData = subDocSnap.data();
+        setItineraryDays(prev => {
+          const filtered = prev.filter(d => d.id !== dayIdStr);
+          return [...filtered, { id: dayIdStr, ...freshDayData }];
+        });
+      } else {
+        // Fallback or refresh standard trip document to see if main days was updated
+        const tripDocRef = doc(db, "trips", trip.id);
+        const tripSnap = await getDoc(tripDocRef);
+        if (tripSnap.exists()) {
+          const freshTripData = { id: tripSnap.id, ...tripSnap.data() };
+          setTrip(freshTripData);
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching fresh day content from Firestore:", err);
+    }
   };
 
   if (loading) {
@@ -425,6 +851,30 @@ export default function TripDetailsPage() {
   }
 
   const { trip_metadata, days } = trip.itinerary;
+  const groupSize = Number(trip?.groupSize) || 1;
+
+  // Budget calculations
+  const budgetPerPerson = Number(trip?.budgetPerPerson) || 0;
+  const totalTripBudget = budgetPerPerson * groupSize;
+  const currentTotalCost = Number(trip_metadata.total_estimated_cost_usd) || 0;
+  const targetPct = totalTripBudget > 0 ? (currentTotalCost / totalTripBudget) * 100 : 0;
+  const targetSpending = totalTripBudget * 0.8;
+  const minTargetSpending = totalTripBudget * 0.75;
+  const maxTargetSpending = totalTripBudget * 0.85;
+
+  let budgetStatus = "Below Target";
+  let statusColor = "text-amber-700 bg-amber-500/10 border-amber-500/20";
+  let statusExplanation = `Current activity spending is under the recommended 75% - 85% range of your stated budget. You have plenty of head room!`;
+
+  if (currentTotalCost >= minTargetSpending && currentTotalCost <= maxTargetSpending) {
+    budgetStatus = "On Target (75-85%)";
+    statusColor = "text-green-700 bg-green-500/10 border-green-500/20";
+    statusExplanation = `Perfect! Your total activity spending sits beautifully in the targeted 75% - 85% range (80% optimal target) of your stated budget.`;
+  } else if (currentTotalCost > maxTargetSpending) {
+    budgetStatus = "Above Target (>85%)";
+    statusColor = "text-red-700 bg-red-500/10 border-red-500/20";
+    statusExplanation = `Heads up! Total activity spending has exceeded 85% of your stated budget. Consider choosing cheaper options during regeneration.`;
+  }
 
   const renderedDays = (days || []).map((origDay: any) => {
     const subDoc = itineraryDays.find(d => d.id === origDay.day_number.toString() || d.day_number === origDay.day_number);
@@ -449,13 +899,19 @@ export default function TripDetailsPage() {
 
   // Extract all activities across all days for voting computations
   const allActivities = renderedDays.flatMap((day: any) => 
-    (day.activities || []).map((act: any, aIdx: number) => ({
-      activity_id: `${day.day_number}_${aIdx}`,
-      name: act.venue_name || act.name,
-      day_number: day.day_number,
-      rawActivity: act,
-      date: day.date
-    }))
+    (day.activities || [])
+      .map((act: any, aIdx: number) => ({
+        activity_id: `${day.day_number}_${aIdx}`,
+        name: act.venue_name || act.name,
+        day_number: day.day_number,
+        rawActivity: act,
+        date: day.date
+      }))
+      .filter((act: any) => {
+        const isClosed = act.rawActivity.google_places_verification?.reason === "permanently_closed" ||
+                         act.rawActivity.google_places_verification?.reason === "temporarily_closed";
+        return !isClosed;
+      })
   );
 
   const activityFeedbackList = allActivities.map(act => {
@@ -533,20 +989,23 @@ export default function TripDetailsPage() {
     <div className="min-h-screen bg-brand-sand pb-32 selection:bg-brand-coral/20">
       {/* Sticky Header */}
       <header className="fixed top-0 left-0 right-0 z-50 bg-brand-sand/80 backdrop-blur-md border-b border-brand-teal/5 py-4 px-6">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <motion.button 
-            whileHover={{ x: -4 }}
-            onClick={() => navigate("/")} 
-            className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-brand-teal/40 hover:text-brand-coral transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" /> Dashboard
-          </motion.button>
+        <div className="max-w-6xl mx-auto grid grid-cols-3 items-center">
+          <div className="flex justify-start">
+            <motion.button 
+              whileHover={{ x: -4 }}
+              onClick={() => navigate("/")} 
+              className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-brand-teal/40 hover:text-brand-coral transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" /> Dashboard
+            </motion.button>
+          </div>
           
-          <div className="flex flex-col items-center">
+          <div className="flex flex-col items-center text-center">
             <h1 className="text-xl md:text-2xl font-serif italic text-brand-teal leading-none">{trip_metadata.destination_resolved}</h1>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center justify-end gap-4">
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.6</span>
             <button
               onClick={handleShare}
               className="flex items-center gap-2 px-5 py-2.5 bg-brand-teal text-white rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-brand-teal/90 shadow-lg shadow-brand-teal/10 transition-all"
@@ -566,7 +1025,7 @@ export default function TripDetailsPage() {
         >
           <div className="inline-flex items-center gap-3 px-5 py-2 bg-brand-accent/10 rounded-full border border-brand-accent/20">
             <Sparkles className="w-4 h-4 text-brand-coral" />
-            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-brand-teal/60">Curated Journey</span>
+            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-brand-teal/60">Curated Journey by Travlly</span>
           </div>
           
           <div className="space-y-4">
@@ -590,11 +1049,126 @@ export default function TripDetailsPage() {
             </div>
             <div className="w-1 h-1 rounded-full bg-brand-teal/10" />
             <div className="flex flex-col items-center">
-              <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/20 mb-1">Est. Cost</span>
-              <span className="text-sm font-bold text-brand-accent">${trip_metadata.total_estimated_cost_usd}</span>
+              <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/20 mb-1">Est. Cost / Person</span>
+              <span className="text-sm font-bold text-brand-accent">${(Number(trip_metadata.total_estimated_cost_usd) / groupSize).toFixed(0)}</span>
+            </div>
+            <div className="w-1 h-1 rounded-full bg-brand-teal/10" />
+            <div className="flex flex-col items-center">
+              <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/20 mb-1">Total Trip Cost</span>
+              <span className="text-sm font-bold text-brand-teal">${trip_metadata.total_estimated_cost_usd}</span>
             </div>
           </div>
         </motion.section>
+
+        {/* Dynamic Accommodation Panel */}
+        {trip.trip_logistics?.has_accommodation && trip.trip_logistics?.accommodation_name && (
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-[#FAF7F2] border border-brand-teal/15 rounded-3xl p-8 md:p-10 space-y-6 max-w-2xl mx-auto shadow-xl shadow-brand-teal/[0.01]"
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">🏨</span>
+              <h3 className="text-xs font-black uppercase tracking-[0.2em] text-brand-teal/50">Booked Accommodation</h3>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-3xl font-serif italic text-brand-teal leading-tight font-medium">
+                  {trip.trip_logistics.accommodation_name}
+                </h4>
+                {trip.trip_logistics.accommodation_location && (
+                  <p className="flex items-center gap-2 text-sm text-brand-teal/65 mt-2 font-light">
+                    <MapPin className="w-4 h-4 text-brand-coral shrink-0" />
+                    <span>{trip.trip_logistics.accommodation_location}</span>
+                  </p>
+                )}
+                {trip.trip_logistics.accommodation_type && (
+                  <span className="inline-block mt-3 px-3.5 py-1.5 bg-brand-teal/5 border border-brand-teal/10 rounded-full text-[10px] font-black uppercase tracking-widest text-brand-teal/60">
+                    {trip.trip_logistics.accommodation_type}
+                  </span>
+                )}
+              </div>
+              <div className="pt-2 flex items-center gap-2 text-green-600 font-bold text-xs uppercase tracking-wider">
+                <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />
+                <span>Booked ✓ <span className="font-light normal-case text-brand-teal/40">(not an algorithmic recommendation)</span></span>
+              </div>
+            </div>
+          </motion.section>
+        )}
+
+        {/* Budget Targeting Panel */}
+        {totalTripBudget > 0 && (
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-[#FAF7F2] border border-brand-teal/15 rounded-3xl p-8 md:p-10 space-y-6 max-w-2xl mx-auto shadow-xl shadow-brand-teal/[0.01]"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-brand-teal/5 pb-4">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">📊</span>
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-[0.2em] text-brand-teal/50">Active Budget Targeting</h3>
+                  <p className="text-[10px] text-brand-teal/40">Maintaining total spending within target threshold</p>
+                </div>
+              </div>
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border ${statusColor}`}>
+                {budgetStatus}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+              <div className="bg-white/60 backdrop-blur-xs p-4 rounded-2xl border border-brand-teal/5">
+                <span className="block text-[9px] font-black uppercase text-brand-teal/30 tracking-widest mb-1">Stated Budget</span>
+                <span className="block text-2xl font-serif italic text-brand-teal">${totalTripBudget.toLocaleString()}</span>
+                <span className="block text-[10px] text-brand-teal/40 mt-1">${budgetPerPerson}/person × {groupSize} people</span>
+              </div>
+
+              <div className="bg-white/60 backdrop-blur-xs p-4 rounded-2xl border border-brand-teal/5">
+                <span className="block text-[9px] font-black uppercase text-brand-teal/30 tracking-widest mb-1">Target Spending (75-85%)</span>
+                <span className="block text-base font-serif italic text-brand-accent">${minTargetSpending.toFixed(0)} - ${maxTargetSpending.toFixed(0)}</span>
+                <span className="block text-[10px] text-brand-teal/40 mt-1">Optimal 80%: ${targetSpending.toFixed(0)}</span>
+              </div>
+
+              <div className="bg-white/60 backdrop-blur-xs p-4 rounded-2xl border border-brand-teal/5">
+                <span className="block text-[9px] font-black uppercase text-brand-teal/30 tracking-widest mb-1">Current Spending</span>
+                <span className="block text-2xl font-serif italic text-[#1A6B7A]">${currentTotalCost.toLocaleString()}</span>
+                <span className="block text-[10px] text-brand-teal/40 mt-1">${(currentTotalCost / groupSize).toFixed(0)}/person ({targetPct.toFixed(0)}% used)</span>
+              </div>
+            </div>
+
+            {/* Target Progress Bar */}
+            <div className="space-y-2">
+              <div className="flex justify-between text-[9px] font-black uppercase tracking-wider text-brand-teal/40 px-1">
+                <span>0% Budget Used</span>
+                <span className="text-brand-accent">Target Range (75-85%)</span>
+                <span>100% Stated Limit</span>
+              </div>
+              <div className="relative h-4 bg-white/50 rounded-full border border-brand-teal/10">
+                {/* 75-85% highlighted region */}
+                <div 
+                  className="absolute top-0 bottom-0 bg-brand-accent/15 border-x border-brand-accent/20"
+                  style={{ left: "75%", width: "10%" }}
+                />
+                {/* Current progress fill */}
+                <div 
+                  className="h-full bg-[#1A6B7A]/20 transition-all duration-500 rounded-full"
+                  style={{ width: `${Math.min(100, targetPct)}%` }}
+                />
+                {/* Marker at current progress */}
+                <div 
+                  className="absolute top-0 bottom-0 w-1 bg-[#1A6B7A] flex items-center justify-center transition-all duration-500"
+                  style={{ left: `${Math.min(100, targetPct)}%` }}
+                >
+                  <div className="w-2.5 h-2.5 rounded-full bg-brand-coral animate-ping absolute" />
+                  <div className="w-1.5 h-1.5 rounded-full bg-[#1A6B7A] absolute" />
+                </div>
+              </div>
+              <p className="text-xs text-brand-teal/60 font-light italic leading-relaxed pt-1">
+                {statusExplanation}
+              </p>
+            </div>
+          </motion.section>
+        )}
 
         {/* Group Feedback Summary Panel (Manage View Only) */}
         {isOrganizer && (
@@ -713,10 +1287,7 @@ export default function TripDetailsPage() {
                             </div>
                             
                             <button
-                              onClick={() => {
-                                setSelectedRegenDay(act.day_number);
-                                setShowRegenModal(true);
-                              }}
+                              onClick={() => handleOpenRegenModal(act.day_number)}
                               className="mt-3 w-full text-center py-2 bg-brand-coral hover:bg-brand-coral/90 text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all shadow-md shadow-brand-coral/10"
                             >
                               Regenerate Day {act.day_number}
@@ -888,6 +1459,207 @@ export default function TripDetailsPage() {
           </motion.section>
         )}
 
+        {/* Local Lingo & Cultural Tips */}
+        {trip && (lingoLoading || localLingo || !trip.local_lingo) && (
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white rounded-3xl overflow-hidden border border-brand-teal/5 shadow-xl shadow-brand-teal/[0.01]"
+          >
+            {/* Header */}
+            <div className="bg-[#1A6B7A] text-white p-6 md:p-8 flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <span className="text-[10px] font-black uppercase tracking-[0.25em] text-brand-coral">Authentic Connection</span>
+                <h3 className="text-2xl md:text-3xl font-serif italic flex items-center gap-2">
+                  Local Lingo & Cultural Tips
+                </h3>
+                <p className="text-white/80 text-xs font-light">
+                  Speak like a local and navigate customs and etiquettes with confidence.
+                </p>
+              </div>
+            </div>
+
+            {lingoLoading ? (
+              <div className="p-12 flex flex-col items-center justify-center space-y-4 bg-[#FAF7F2]">
+                <div className="w-10 h-10 border-4 border-brand-teal/10 border-t-brand-coral rounded-full animate-spin" />
+                <p className="text-xs text-brand-teal/50 italic">Generating custom cultural guide for {trip.destination || "destination"}...</p>
+              </div>
+            ) : (!localLingo || (!localLingo.essential_phrases && !localLingo.common_slang && !localLingo.cultural_tips)) ? (
+              /* EMPTY STATE / OBSCURE fallback */
+              <div className="p-10 text-center space-y-3 bg-[#FAF7F2]">
+                <p className="text-sm font-semibold text-brand-teal/70">Cultural tips coming soon for this destination</p>
+                <p className="text-xs text-brand-teal/40 italic max-w-sm mx-auto">
+                  We're still gathering authentic phrases and local insights for "{trip.destination || 'this location'}".
+                </p>
+              </div>
+            ) : (
+              /* CONTENT SECTIONS */
+              <div className="p-6 md:p-8 space-y-6 bg-white">
+                {/* 1. Essential Phrases (💬) */}
+                <div className="border border-brand-teal/5 rounded-2xl overflow-hidden">
+                  <header
+                    onClick={() => setLingoSectionsExpanded(prev => ({ ...prev, phrases: !prev.phrases }))}
+                    className="bg-[#FAF7F2] px-6 py-4 flex items-center justify-between cursor-pointer hover:bg-brand-sand/10 transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xl">💬</span>
+                      <h4 className="text-sm font-black uppercase tracking-wider text-brand-teal">Essential Phrases</h4>
+                      <span className="px-2 py-0.5 bg-brand-teal/5 text-brand-teal text-[9px] font-black rounded-full">
+                        {localLingo.essential_phrases?.length || 0} items
+                      </span>
+                    </div>
+                    {lingoSectionsExpanded.phrases ? (
+                      <ChevronUp className="w-4 h-4 text-brand-teal/50" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-brand-teal/50" />
+                    )}
+                  </header>
+                  
+                  <AnimatePresence initial={false}>
+                    {lingoSectionsExpanded.phrases && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden border-t border-brand-teal/5 bg-white"
+                      >
+                        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {localLingo.essential_phrases && localLingo.essential_phrases.length > 0 ? (
+                            localLingo.essential_phrases.map((itm: any, idx: number) => (
+                              <div key={idx} className="p-4 rounded-2xl bg-[#FAF7F2] border border-brand-teal/[0.03] space-y-2 hover:border-[#E87E5C]/20 transition-colors">
+                                <div className="flex flex-wrap items-baseline gap-2">
+                                  <span className="text-base font-bold text-[#E87E5C]">{itm.local}</span>
+                                  <span className="text-xs text-brand-teal/30">•</span>
+                                  <span className="text-sm font-medium text-brand-teal">{itm.english}</span>
+                                </div>
+                                <p className="text-xs text-brand-teal/60 font-light leading-relaxed">
+                                  {itm.context}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-brand-teal/40 italic p-4 col-span-full">No essential phrases available.</p>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* 2. Common Slang (🗣️) */}
+                <div className="border border-brand-teal/5 rounded-2xl overflow-hidden">
+                  <header
+                    onClick={() => setLingoSectionsExpanded(prev => ({ ...prev, slang: !prev.slang }))}
+                    className="bg-[#FAF7F2] px-6 py-4 flex items-center justify-between cursor-pointer hover:bg-brand-sand/10 transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xl">🗣️</span>
+                      <h4 className="text-sm font-black uppercase tracking-wider text-brand-teal">Common Slang</h4>
+                      <span className="px-2 py-0.5 bg-brand-teal/5 text-brand-teal text-[9px] font-black rounded-full">
+                        {localLingo.common_slang?.length || 0} items
+                      </span>
+                    </div>
+                    {lingoSectionsExpanded.slang ? (
+                      <ChevronUp className="w-4 h-4 text-brand-teal/50" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-brand-teal/50" />
+                    )}
+                  </header>
+
+                  <AnimatePresence initial={false}>
+                    {lingoSectionsExpanded.slang && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden border-t border-brand-teal/5 bg-white"
+                      >
+                        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {localLingo.common_slang && localLingo.common_slang.length > 0 ? (
+                            localLingo.common_slang.map((itm: any, idx: number) => (
+                              <div key={idx} className="p-4 rounded-2xl bg-[#FAF7F2] border border-brand-teal/[0.03] space-y-2 hover:border-[#E87E5C]/20 transition-colors">
+                                <div className="flex flex-wrap items-baseline gap-2 font-sans">
+                                  <span className="text-base font-bold text-[#E87E5C]">{itm.local}</span>
+                                  <span className="text-xs text-brand-teal/30">•</span>
+                                  <span className="text-sm font-medium text-brand-teal">{itm.english}</span>
+                                </div>
+                                <p className="text-xs text-brand-teal/60 font-light leading-relaxed">
+                                  {itm.context}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-xs text-brand-teal/40 italic p-4 col-span-full">
+                              No general slang listed. Speak standard language with a warm smile!
+                            </div>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* 3. Cultural Tips (🤝) */}
+                <div className="border border-brand-teal/5 rounded-2xl overflow-hidden">
+                  <header
+                    onClick={() => setLingoSectionsExpanded(prev => ({ ...prev, tips: !prev.tips }))}
+                    className="bg-[#FAF7F2] px-6 py-4 flex items-center justify-between cursor-pointer hover:bg-brand-sand/10 transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xl">🤝</span>
+                      <h4 className="text-sm font-black uppercase tracking-wider text-brand-teal">Cultural Tips (Do's & Don'ts)</h4>
+                      <span className="px-2 py-0.5 bg-brand-teal/5 text-brand-teal text-[9px] font-black rounded-full">
+                        {localLingo.cultural_tips?.length || 0} items
+                      </span>
+                    </div>
+                    {lingoSectionsExpanded.tips ? (
+                      <ChevronUp className="w-4 h-4 text-brand-teal/50" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-brand-teal/50" />
+                    )}
+                  </header>
+
+                  <AnimatePresence initial={false}>
+                    {lingoSectionsExpanded.tips && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="overflow-hidden border-t border-brand-teal/5 bg-white"
+                      >
+                        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {localLingo.cultural_tips && localLingo.cultural_tips.length > 0 ? (
+                            localLingo.cultural_tips.map((itm: any, idx: number) => {
+                              const isDo = itm.tip_type === "do" || String(itm.tip_type).toLowerCase() === "do";
+                              return (
+                                <div key={idx} className="p-4 rounded-2xl bg-[#FAF7F2] border border-brand-teal/[0.03] space-y-2 hover:border-[#E87E5C]/20 transition-colors flex gap-3 items-start">
+                                  <span className={`text-xs font-black shrink-0 ${isDo ? "text-green-600" : "text-brand-coral"}`}>
+                                    {isDo ? "✓ DO" : "✗ DON'T"}
+                                  </span>
+                                  <div className="space-y-1">
+                                    <span className="text-xs font-bold text-brand-teal block">{itm.tip}</span>
+                                    <p className="text-xs text-brand-teal/60 font-light leading-relaxed">
+                                      {itm.explanation}
+                                    </p>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <div className="text-xs text-brand-teal/40 italic p-4 col-span-full">
+                              Be kind, respectful, and observant. That is always correct everywhere!
+                            </div>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </div>
+            )}
+          </motion.section>
+        )}
+
         {/* Itinerary Body */}
         <section className="space-y-32">
           {renderedDays.map((day: any, idx: number) => (
@@ -908,10 +1680,35 @@ export default function TripDetailsPage() {
                   </div>
                   <div className="space-y-1">
                     <div className="flex items-center flex-wrap gap-2">
-                      <span className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-coral">Day {day.day_number}</span>
+                      <span className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-coral">
+                        {day.day_number === trip_metadata.total_days && trip.trip_logistics?.has_flight && trip.trip_logistics?.flight_departure_datetime 
+                          ? `Last Day (Day ${day.day_number})` 
+                          : `Day ${day.day_number}`}
+                      </span>
                       {day.isRegenerated && (
                         <span className="px-2 py-0.5 bg-brand-coral/10 text-brand-coral text-[8px] font-black tracking-widest uppercase rounded">
                           Regenerated
+                        </span>
+                      )}
+                      
+                      {day.day_number === 1 && trip.trip_logistics?.has_flight && trip.trip_logistics?.flight_arrival_datetime && (
+                        <span className="px-2 py-0.5 bg-[#E87E5C]/15 border border-[#E87E5C]/20 text-[#E87E5C] text-[8px] font-black tracking-widest uppercase rounded flex items-center gap-1 leading-none">
+                          ✈️ Arrival: {formatFlightTime(trip.trip_logistics.flight_arrival_datetime)}
+                        </span>
+                      )}
+                      
+                      {day.day_number === trip_metadata.total_days && trip.trip_logistics?.has_flight && trip.trip_logistics?.flight_departure_datetime && (
+                        <span className="px-2 py-0.5 bg-brand-teal/10 border border-brand-teal/20 text-[#1A6B7A] text-[8px] font-black tracking-widest uppercase rounded flex items-center gap-1 leading-none">
+                          ✈️ Departure: {formatFlightTime(trip.trip_logistics.flight_departure_datetime)}
+                        </span>
+                      )}
+
+                      {day.estimated_day_cost_usd !== undefined && day.estimated_day_cost_usd !== null && day.estimated_day_cost_usd > 0 && (
+                        <span className="px-2 py-0.5 bg-brand-teal/5 border border-brand-teal/10 text-[#1A6B7A] text-[8px] font-black tracking-widest uppercase rounded flex items-center gap-1 leading-none">
+                          💰 Est: ${(Number(day.estimated_day_cost_usd) / groupSize).toFixed(2)}/person
+                          {groupSize > 1 && (
+                            <span className="opacity-50 font-normal">(${day.estimated_day_cost_usd} total)</span>
+                          )}
                         </span>
                       )}
                     </div>
@@ -937,10 +1734,7 @@ export default function TripDetailsPage() {
                   {/* Regenerate Day Button */}
                   {isOrganizer && (
                     <button
-                      onClick={() => {
-                        setSelectedRegenDay(day.day_number);
-                        setShowRegenModal(true);
-                      }}
+                      onClick={() => handleOpenRegenModal(day.day_number)}
                       className="flex items-center gap-2 px-4 py-2 bg-brand-teal/5 border border-brand-teal/10 hover:border-brand-coral hover:bg-brand-coral hover:text-white transition-all text-brand-teal rounded-xl text-[10px] font-black uppercase tracking-widest"
                     >
                       <Sparkles className="w-3.5 h-3.5" /> Regenerate Day {day.day_number}
@@ -961,36 +1755,47 @@ export default function TripDetailsPage() {
                 </div>
 
                 <div className="space-y-8">
-                  {day.activities.map((activity: any, aIdx: number) => {
-                    const activityId = `${day.day_number}_${aIdx}`;
-                    const likesCount = votes.filter(v => v.activity_id === activityId && v.vote_type === "like").length;
-                    const dislikesCount = votes.filter(v => v.activity_id === activityId && v.vote_type === "dislike").length;
-                    const userVote = votes.find(v => v.activity_id === activityId && v.voter_id === voterId);
-                    const currentVoteType = userVote?.vote_type; // "like", "dislike", or undefined
+                  {day.activities
+                    .map((activity: any, originalIndex: number) => ({ ...activity, originalIndex }))
+                    .filter((activity: any) => {
+                      const isClosed = activity.google_places_verification?.reason === "permanently_closed" ||
+                                       activity.google_places_verification?.reason === "temporarily_closed";
+                      return !isClosed;
+                    })
+                    .map((activity: any, renderedIndex: number) => {
+                      const activityId = `${day.day_number}_${activity.originalIndex}`;
 
-                    return (
-                      <motion.div 
-                        key={aIdx}
-                        whileHover={{ x: 6 }}
+                      const likesCount = votes.filter(v => v.activity_id === activityId && v.vote_type === "like").length;
+                      const dislikesCount = votes.filter(v => v.activity_id === activityId && v.vote_type === "dislike").length;
+                      const userVote = votes.find(v => v.activity_id === activityId && v.voter_id === voterId);
+                      const currentVoteType = userVote?.vote_type; // "like", "dislike", or undefined
+
+                      const displayVenueName = activity.venue_name || activity.name;
+                      const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${activity.venue_name || activity.name} ${activity.neighborhood || ""} ${trip_metadata.destination_resolved || ""}`)}`;
+
+                      return (
+                        <motion.div 
+                          key={activity.originalIndex}
+                          whileHover={{ x: 6 }}
                         className="group relative pl-8 pb-12 border-l border-brand-teal/5 last:border-0"
                       >
                         <div className="absolute left-[-5px] top-1.5 w-2.5 h-2.5 rounded-full bg-brand-sand border-2 border-brand-accent group-hover:bg-brand-coral group-hover:border-brand-coral transition-colors" />
                         
                         <div className="space-y-4">
                           <div className="flex flex-wrap items-center justify-between gap-4">
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center flex-wrap gap-3">
                               <span className="text-xs font-black text-brand-teal/20 tabular-nums">{activity.start_time}</span>
                               <h4 className="text-2xl font-bold text-brand-teal group-hover:text-brand-coral transition-all leading-tight">
                                 {activity.venue_name ? (
                                   <a
-                                    href={getGoogleMapsLink(activity.venue_name, activity.neighborhood, trip_metadata.destination_resolved)}
+                                    href={mapsUrl}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     title="Open in Google Maps"
                                     className="inline-flex items-center gap-1.5 hover:underline decoration-brand-coral/30 hover:text-brand-coral decoration-2 underline-offset-4 transition-all"
                                   >
                                     <MapPin className="w-5 h-5 text-brand-coral/80 shrink-0" />
-                                    <span>{activity.venue_name}</span>
+                                    <span>{displayVenueName}</span>
                                   </a>
                                 ) : (
                                   activity.name
@@ -1001,7 +1806,7 @@ export default function TripDetailsPage() {
                               </span>
                             </div>
                             <a 
-                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${activity.venue_name} ${activity.neighborhood} ${trip_metadata.destination_resolved}`)}`}
+                              href={mapsUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="flex items-center gap-2 px-4 py-1.5 bg-brand-teal/5 hover:bg-brand-teal/10 rounded-full text-[9px] font-bold uppercase tracking-widest text-brand-teal/60 transition-all opacity-0 group-hover:opacity-100"
@@ -1022,7 +1827,7 @@ export default function TripDetailsPage() {
                                   onClick={() => handleVote(activityId, "like")}
                                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold tracking-wide transition-all active:scale-95 cursor-pointer shadow-sm ${
                                     currentVoteType === "like"
-                                      ? "bg-brand-coral text-white border border-transparent shadow-brand-coral/25"
+                                      ? "bg-brand-coral text-white border border-transparent shadow-sm shadow-brand-coral/25"
                                       : "bg-white hover:bg-brand-teal/5 text-brand-teal border border-brand-teal/10 hover:border-brand-coral/20"
                                   }`}
                                 >
@@ -1034,7 +1839,7 @@ export default function TripDetailsPage() {
                                   onClick={() => handleVote(activityId, "dislike")}
                                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold tracking-wide transition-all active:scale-95 cursor-pointer shadow-sm ${
                                     currentVoteType === "dislike"
-                                      ? "bg-brand-teal text-white border border-transparent shadow-brand-teal/20"
+                                      ? "bg-brand-teal text-white border border-transparent shadow-sm shadow-brand-teal/20"
                                       : "bg-white hover:bg-brand-teal/5 text-brand-teal border border-brand-teal/10 hover:border-brand-coral/20"
                                   }`}
                                 >
@@ -1090,14 +1895,18 @@ export default function TripDetailsPage() {
                               <Clock className="w-3 h-3 text-brand-accent" /> {activity.duration_minutes}m
                             </span>
                             <span className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-brand-teal/30 bg-brand-teal/[0.02] px-3 py-1 rounded-md border border-brand-teal/[0.05]">
-                              <DollarSign className="w-3 h-3 text-brand-coral" /> ${activity.estimated_cost_usd}
+                              <DollarSign className="w-3 h-3 text-brand-coral" /> ${(Number(activity.estimated_cost_usd) / groupSize).toFixed(2)}/person
+                              {groupSize > 1 && (
+                                <span className="opacity-50 font-normal lowercase">(${activity.estimated_cost_usd} total)</span>
+                              )}
                             </span>
-                            <span className="text-[9px] font-medium text-brand-teal/30 italic flex flex-wrap items-center gap-1">
-                              <span>{activity.neighborhood}</span>
+                            <span className="text-[9px] font-medium text-brand-teal/40 italic flex flex-wrap items-center gap-1.5">
+                              <MapPin className="w-3.5 h-3.5 text-brand-teal/30 shrink-0" />
+                              <span>{activity.neighborhood || "Local District"}</span>
                               {activity.name && activity.name !== activity.venue_name && (
                                 <>
                                   <span className="opacity-60">—</span>
-                                  <span className="font-semibold text-brand-teal/40">{activity.name}</span>
+                                  <span className="font-semibold text-brand-teal/50">{activity.name}</span>
                                 </>
                               )}
                             </span>
@@ -1108,16 +1917,46 @@ export default function TripDetailsPage() {
                               {activity.transit_notes}
                             </div>
                           )}
-                          
-                          {activity.verify_hours && (
-                            <div className="flex items-center gap-2 text-amber-600/60 text-[9px] font-bold uppercase tracking-widest">
-                              <AlertCircle className="w-3.5 h-3.5" /> Security Check: Verify operating hours ahead of time
-                            </div>
-                          )}
                         </div>
                       </motion.div>
                     );
                   })}
+
+                  {/* Travel Legs / Transit to Hotel Option */}
+                  {trip.trip_logistics?.has_accommodation && trip.trip_logistics?.accommodation_name && (day.day_number !== trip_metadata.total_days || !trip.trip_logistics?.flight_departure_datetime) && (
+                    <motion.div
+                      whileHover={{ x: 6 }}
+                      className="group relative pl-8 pb-4 border-l border-brand-teal/5 last:border-0"
+                    >
+                      <div className="absolute left-[-5px] top-1.5 w-2.5 h-2.5 rounded-full bg-brand-sand border-2 border-brand-coral group-hover:bg-[#E87E5C] group-hover:border-[#E87E5C] transition-colors" />
+                      
+                      <div className="space-y-3 bg-[#FAF7F2]/80 p-5 rounded-2xl border border-brand-teal/[0.04]">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">🚗</span>
+                          <span className="text-[10px] font-black uppercase tracking-[0.25em] text-[#E87E5C]">Transit to Hotel Loft</span>
+                        </div>
+                        <div className="space-y-1">
+                          <h4 className="text-lg font-bold text-brand-teal">
+                            Commute to {trip.trip_logistics.accommodation_name}
+                          </h4>
+                          <p className="text-xs text-brand-teal/50 font-light leading-relaxed">
+                            Conclude the day's adventures and head back to your home base in {trip.trip_logistics.accommodation_location || "the city center"}.
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-4 pt-1">
+                          <span className="text-[9px] font-black uppercase tracking-widest text-[#1A6B7A] bg-brand-teal/5 px-2.5 py-1 rounded-md">
+                            Commute: ~20-25 mins
+                          </span>
+                          <span className="text-[9px] font-black uppercase tracking-widest text-brand-coral bg-brand-coral/5 px-2.5 py-1 rounded-md">
+                            Mode: Taxi / Car / Scooter
+                          </span>
+                          <span className="text-[9px] font-black uppercase tracking-widest text-brand-teal/40 bg-brand-teal/[0.02] px-2.5 py-1 rounded-md">
+                            Est. Cost: $5 - $12
+                          </span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
                 </div>
               </div>
             </motion.div>
@@ -1177,7 +2016,21 @@ export default function TripDetailsPage() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="absolute inset-0 bg-brand-teal/45 backdrop-blur-sm"
-              onClick={() => !regeneratingLoading && setShowRegenModal(false)}
+              onClick={() => {
+                if (!regeneratingLoading) {
+                  if (activitiesToRemove.length > 0 || additionalActivities > 0 || regenText || regenChips.length > 0) {
+                    setSuccessToast("Changes discarded. Your day is unchanged.");
+                    setTimeout(() => setSuccessToast(null), 3000);
+                  }
+                  setShowRegenModal(false);
+                  setRegenText("");
+                  setRegenChips([]);
+                  setActivitiesToRemove([]);
+                  setAdditionalActivities(0);
+                  setRegenWarningAllRemoved(false);
+                  setRegenError(null);
+                }
+              }}
             />
 
             {/* Modal Box */}
@@ -1229,48 +2082,156 @@ export default function TripDetailsPage() {
                     </div>
                   )}
 
-                  {/* Free-text instructions */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-brand-teal/40">
-                      <span>What should be different about this day?</span>
-                      <span>{regenText.length}/200</span>
-                    </div>
-                    <textarea
-                      value={regenText}
-                      onChange={(e) => setRegenText(e.target.value.substring(0, 200))}
-                      placeholder="e.g., cheaper options, more food, less walking, indoor activities..."
-                      rows={3}
-                      className="w-full bg-brand-sand/35 border border-brand-teal/15 focus:border-brand-coral focus:ring-1 focus:ring-brand-coral rounded-2xl p-4 text-sm text-brand-teal outline-none transition-all placeholder:text-brand-teal/20"
-                    />
-                  </div>
-
-                  {/* Shortcut Chips */}
+                  {/* SECTION 1: REMOVE SPECIFIC ACTIVITIES */}
                   <div className="space-y-3">
-                    <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">Select Shortcut Chips</span>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        { label: "Cheaper options", value: "cheaper options" },
-                        { label: "More food focus", value: "more food focus" },
-                        { label: "Less walking", value: "less walking" },
-                        { label: "Indoor alternatives", value: "indoor alternatives" },
-                        { label: "More adventure", value: "more adventure" }
-                      ].map((chip) => {
-                        const active = regenChips.includes(chip.value);
+                    <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
+                      Remove specific activities (optional)
+                    </span>
+                    <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                      {currentDayActivities.map((act: any, idx: number) => {
+                        const isChecked = activitiesToRemove.includes(idx);
                         return (
-                          <button
-                            key={chip.value}
-                            type="button"
-                            onClick={() => handleChipToggle(chip.value)}
-                            className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
-                              active
-                                ? "bg-brand-coral text-white border-brand-coral shadow-lg shadow-brand-coral/15"
-                                : "bg-brand-sand/15 text-brand-teal border-brand-teal/10 hover:border-brand-teal/30"
+                          <div
+                            key={idx}
+                            onClick={() => {
+                              setActivitiesToRemove(prev => {
+                                const exists = prev.includes(idx);
+                                const updated = exists ? prev.filter(i => i !== idx) : [...prev, idx];
+                                if (updated.length !== currentDayActivities.length) {
+                                  setRegenWarningAllRemoved(false);
+                                }
+                                return updated;
+                              });
+                            }}
+                            className={`flex items-center gap-3 p-3 text-left cursor-pointer rounded-2xl border transition-all ${
+                              isChecked
+                                ? "bg-[#FFE5E5] border-red-200"
+                                : "bg-brand-sand/10 border-brand-teal/5 hover:bg-brand-sand/20 hover:border-brand-teal/15"
                             }`}
                           >
-                            {chip.label}
-                          </button>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {}} // toggled by outer onClick card click
+                              className="w-4 h-4 rounded text-brand-coral border-brand-teal/20 focus:ring-brand-coral shrink-0"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className={`text-xs font-bold leading-tight ${isChecked ? "text-red-900 line-through" : "text-brand-teal"}`}>
+                                {act.venue_name || act.name}
+                              </div>
+                               <div className="flex flex-wrap items-center gap-2 mt-1 text-[10px] text-brand-teal/40">
+                                ${(act.start_time || act.time) && (
+                                  <span>{act.start_time || act.time}</span>
+                                )}
+                                {(act.duration_minutes !== undefined || act.duration) && (
+                                  <>
+                                    <span>•</span>
+                                    <span>{act.duration_minutes !== undefined ? `${act.duration_minutes}m` : act.duration}</span>
+                                  </>
+                                )}
+                                {(act.estimated_cost_usd !== undefined || act.cost) && (
+                                  <>
+                                    <span>•</span>
+                                    <span>
+                                      ${(Number(act.estimated_cost_usd ?? act.cost) / groupSize).toFixed(2)}/person
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
                         );
                       })}
+                    </div>
+                  </div>
+
+                  {/* Dynamic Confirmation Warning Box */}
+                  {regenWarningAllRemoved && (
+                    <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-[11px] text-red-700 italic font-medium leading-relaxed">
+                      ⚠️ You're removing all activities. At least one must remain or be generated. Regenerate to get a fresh day.
+                    </div>
+                  )}
+
+                  {/* SECTION 2: CHIPS & CUSTOM CONSTRAINTS */}
+                  <div className="border-t border-brand-teal/5 pt-4 space-y-4">
+                    {/* Add more activities picker */}
+                    <div className="bg-brand-sand/15 p-4 rounded-2xl border border-brand-teal/5 space-y-3">
+                      <div>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
+                          Add more activities (optional)
+                        </span>
+                        <span className="text-[11px] text-brand-teal/50 font-medium mt-1 block">
+                          Currently {currentDayActivities.length - activitiesToRemove.length} active + {additionalActivities} new = {currentDayActivities.length - activitiesToRemove.length + additionalActivities} total activities
+                        </span>
+                      </div>
+                      
+                      <div className="flex items-center gap-2">
+                        {[0, 1, 2, 3, 4, 5].map((num) => {
+                          const active = additionalActivities === num;
+                          return (
+                            <button
+                              key={num}
+                              type="button"
+                              onClick={() => setAdditionalActivities(num)}
+                              className={`w-9 h-9 rounded-xl text-xs font-black transition-all flex items-center justify-center border ${
+                                active
+                                  ? "bg-brand-coral text-white border-brand-coral shadow-md shadow-brand-coral/15"
+                                  : "bg-white text-brand-teal border-brand-teal/10 hover:border-brand-teal/25"
+                              }`}
+                            >
+                              +{num}
+                            </button>
+                          );
+                        })}
+                        <span className="text-[11px] text-brand-teal/40 italic font-medium ml-2">
+                          {additionalActivities === 0 ? "No extra" : `${additionalActivities} additional`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Free-text instructions */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-brand-teal/40">
+                        <span>What should be different about this day?</span>
+                        <span>{regenText.length}/200</span>
+                      </div>
+                      <textarea
+                        value={regenText}
+                        onChange={(e) => setRegenText(e.target.value.substring(0, 200))}
+                        placeholder="e.g., cheaper options, more food, less walking, indoor activities..."
+                        rows={2}
+                        className="w-full bg-brand-sand/35 border border-brand-teal/15 focus:border-brand-coral focus:ring-1 focus:ring-brand-coral rounded-2xl p-4 text-sm text-brand-teal outline-none transition-all placeholder:text-brand-teal/20"
+                      />
+                    </div>
+
+                    {/* Shortcut Chips */}
+                    <div className="space-y-3">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">Select Shortcut Chips</span>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          { label: "Cheaper options", value: "cheaper options" },
+                          { label: "More food focus", value: "more food focus" },
+                          { label: "Less walking", value: "less walking" },
+                          { label: "Indoor alternatives", value: "indoor alternatives" },
+                          { label: "More adventure", value: "more adventure" }
+                        ].map((chip) => {
+                          const active = regenChips.includes(chip.value);
+                          return (
+                            <button
+                              key={chip.value}
+                              type="button"
+                              onClick={() => handleChipToggle(chip.value)}
+                              className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                                active
+                                  ? "bg-brand-coral text-white border-brand-coral shadow-lg shadow-brand-coral/15"
+                                  : "bg-brand-sand/15 text-brand-teal border-brand-teal/10 hover:border-brand-teal/30"
+                              }`}
+                            >
+                              {chip.label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
@@ -1279,9 +2240,16 @@ export default function TripDetailsPage() {
                     <button
                       type="button"
                       onClick={() => {
+                        if (activitiesToRemove.length > 0 || additionalActivities > 0 || regenText || regenChips.length > 0) {
+                          setSuccessToast("Changes discarded. Your day is unchanged.");
+                          setTimeout(() => setSuccessToast(null), 3000);
+                        }
                         setShowRegenModal(false);
                         setRegenText("");
                         setRegenChips([]);
+                        setActivitiesToRemove([]);
+                        setAdditionalActivities(0);
+                        setRegenWarningAllRemoved(false);
                         setRegenError(null);
                       }}
                       className="px-6 py-3 border border-brand-teal/10 hover:bg-brand-sand/20 rounded-xl text-xs font-black uppercase tracking-widest text-brand-teal"
@@ -1290,10 +2258,17 @@ export default function TripDetailsPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={handleRegenerateDaySubmit}
-                      className="px-6 py-3 bg-brand-coral hover:bg-brand-coral/90 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-brand-coral/10"
+                      onClick={() => {
+                        const total = currentDayActivities.length;
+                        if (total > 0 && activitiesToRemove.length === total && !regenWarningAllRemoved) {
+                          setRegenWarningAllRemoved(true);
+                          return;
+                        }
+                        handleRegenerateDaySubmit();
+                      }}
+                      className="px-6 py-3 bg-brand-coral hover:bg-brand-coral/90 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-brand-coral/10 hover:scale-[1.02] active:scale-[0.98]"
                     >
-                      Regenerate
+                      {regenWarningAllRemoved ? "Confirm & Regenerate" : "Regenerate"}
                     </button>
                   </div>
                 </div>
@@ -1346,6 +2321,13 @@ export default function TripDetailsPage() {
                           </div>
                         </div>
 
+                        {version.regeneration_reason && (
+                          <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200/40 px-3 py-1.5 rounded-xl font-medium">
+                            <span className="font-extrabold text-brand-coral uppercase tracking-wider text-[9px] mr-1.5">Changes:</span>
+                            {version.regeneration_reason}
+                          </div>
+                        )}
+
                         {version.day_notes && (
                           <p className="text-xs italic text-brand-teal/50 font-light border-l-2 border-brand-accent/20 pl-3">
                             "{version.day_notes}"
@@ -1353,7 +2335,11 @@ export default function TripDetailsPage() {
                         )}
 
                         <div className="space-y-3">
-                          {version.activities && version.activities.map((act: any, aIdx: number) => (
+                          {version.activities && version.activities.filter((act: any) => {
+                            const isClosed = act.google_places_verification?.reason === "permanently_closed" ||
+                                             act.google_places_verification?.reason === "temporarily_closed";
+                            return !isClosed;
+                          }).map((act: any, aIdx: number) => (
                             <div key={aIdx} className="flex items-start justify-between gap-4 p-3 bg-white/70 rounded-xl border border-brand-teal/[0.03]">
                               <div className="space-y-1">
                                 <div className="flex items-center gap-2">
@@ -1402,6 +2388,10 @@ export default function TripDetailsPage() {
           </div>
         )}
       </AnimatePresence>
+
+      <div className="max-w-6xl mx-auto px-6 mt-16 pb-10">
+        <Footer />
+      </div>
     </div>
   );
 }
@@ -1461,5 +2451,21 @@ function getWeatherIcon(iconName: string) {
     default:
       return <Sun className="w-8 h-8 text-amber-500 animate-[spin_5s_linear_infinite]" />;
   }
+}
+
+function formatFlightTime(dateTimeVal: any): string {
+  if (!dateTimeVal) return "";
+  let d: Date;
+  if (typeof dateTimeVal.toDate === "function") {
+    d = dateTimeVal.toDate();
+  } else if (dateTimeVal.seconds !== undefined) {
+    d = new Date(dateTimeVal.seconds * 1000);
+  } else {
+    d = new Date(dateTimeVal);
+  }
+  if (isNaN(d.getTime())) return "Invalid Time";
+  const hours = String(d.getUTCHours()).padStart(2, '0');
+  const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
 }
 

@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "firebase/auth";
 import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
 import { auth, db, handleFirestoreError, OperationType } from "../lib/firebase";
+import Footer from "./Footer";
 
 export default function LandingPage() {
   const navigate = useNavigate();
@@ -99,7 +100,7 @@ export default function LandingPage() {
               <Plane className="w-5 h-5 text-white" />
             </div>
             <span className="text-2xl font-bold tracking-tight text-brand-teal">
-              travlly <span className="text-xs font-semibold tracking-normal text-brand-teal/60 ml-1.5">1.5</span>
+              travlly<span className="text-[17px] font-bold tracking-normal text-brand-teal/60 ml-0.5 leading-[28px] text-justify bg-transparent">1.6</span>
             </span>
           </div>
           <div className="flex items-center gap-6">
@@ -289,6 +290,10 @@ export default function LandingPage() {
           <FeaturePill icon={<Plane className="w-4 h-4" />} label="Gemini Powered" />
         </motion.div>
       )}
+
+      <div className="max-w-6xl mx-auto pb-10">
+        <Footer />
+      </div>
     </div>
   );
 }

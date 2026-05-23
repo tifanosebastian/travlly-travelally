@@ -28,6 +28,14 @@
           "type": "array",
           "items": { "type": "string" },
           "maxItems": 20
+        },
+        "local_lingo": {
+          "type": "object",
+          "description": "AI-generated local phrases, slang, and cultural tips."
+        },
+        "trip_logistics": {
+          "type": "object",
+          "description": "Optional flight and hotel travel details."
         }
       },
       "required": ["destination", "startDate", "endDate", "groupSize", "budgetPerPerson", "vibeTags", "pace", "createdAt", "updatedAt"]
@@ -44,6 +52,17 @@
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["activity_id", "trip_id", "voter_id", "vote_type", "created_at"]
+    },
+    "GooglePlacesCache": {
+      "title": "GooglePlacesCache",
+      "description": "Represents cached Google Places verification data to avoid duplicate API calls and optimize API costs.",
+      "type": "object",
+      "properties": {
+        "query": { "type": "string" },
+        "verification_data": { "type": "object" },
+        "cached_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["query", "verification_data", "cached_at"]
     }
   },
   "firestore": {
@@ -54,6 +73,10 @@
     "/activity_votes/{voteId}": {
       "schema": "ActivityVote",
       "description": "Viewer votes on activities."
+    },
+    "/google_places_cache/{cacheKey}": {
+      "schema": "GooglePlacesCache",
+      "description": "Global caching of Google Places Text Search and Details API responses."
     }
   }
 }
