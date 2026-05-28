@@ -988,9 +988,11 @@ export default function TripDetailsPage() {
   return (
     <div className="min-h-screen bg-brand-sand pb-32 selection:bg-brand-coral/20">
       {/* Sticky Header */}
-      <header className="fixed top-0 left-0 right-0 z-50 bg-brand-sand/80 backdrop-blur-md border-b border-brand-teal/5 py-4 px-6">
-        <div className="max-w-6xl mx-auto grid grid-cols-3 items-center">
-          <div className="flex justify-start">
+      <header className="fixed top-0 left-0 right-0 z-50 bg-brand-sand/80 backdrop-blur-md border-b border-brand-teal/5 py-3 px-4 sm:py-4 sm:px-6">
+        <div className="max-w-6xl mx-auto flex flex-col sm:grid sm:grid-cols-3 items-center gap-2 sm:gap-0">
+          
+          {/* Dashboard Left / Mobile Header Top Row */}
+          <div className="flex justify-between sm:justify-start items-center w-full sm:w-auto">
             <motion.button 
               whileHover={{ x: -4 }}
               onClick={() => navigate("/")} 
@@ -998,14 +1000,27 @@ export default function TripDetailsPage() {
             >
               <ArrowLeft className="w-4 h-4" /> Dashboard
             </motion.button>
+
+            {/* Mobile share button / version wrapper */}
+            <div className="flex sm:hidden items-center gap-3">
+              <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.7</span>
+              <button
+                onClick={handleShare}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-brand-teal text-white rounded-full text-[9px] font-black uppercase tracking-widest hover:bg-brand-teal/90 shadow-lg shadow-brand-teal/10 transition-all"
+              >
+                <Share2 className="w-3 h-3" /> {copied ? "Copied!" : "Share"}
+              </button>
+            </div>
           </div>
           
-          <div className="flex flex-col items-center text-center">
-            <h1 className="text-xl md:text-2xl font-serif italic text-brand-teal leading-none">{trip_metadata.destination_resolved}</h1>
+          {/* Title Center */}
+          <div className="flex flex-col items-center text-center w-full sm:auto">
+            <h1 className="text-lg sm:text-xl md:text-2xl font-serif italic text-brand-teal leading-none">{trip_metadata.destination_resolved}</h1>
           </div>
 
-          <div className="flex items-center justify-end gap-4">
-            <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.6</span>
+          {/* Desktop Only Share Buttons */}
+          <div className="hidden sm:flex items-center justify-end gap-4 w-full sm:w-auto">
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.7</span>
             <button
               onClick={handleShare}
               className="flex items-center gap-2 px-5 py-2.5 bg-brand-teal text-white rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-brand-teal/90 shadow-lg shadow-brand-teal/10 transition-all"
@@ -2038,18 +2053,18 @@ export default function TripDetailsPage() {
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-lg bg-white rounded-3xl p-8 shadow-2xl border border-brand-teal/5 overflow-hidden z-[120]"
+              className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-brand-teal/5 overflow-hidden z-[120] flex flex-col max-h-[85vh]"
             >
               {/* Header */}
-              <div className="space-y-2 mb-6">
+              <div className="space-y-1.5 p-6 sm:p-8 pb-4 shrink-0 border-b border-brand-teal/5">
                 <span className="text-[10px] font-black uppercase tracking-[0.2em] text-brand-coral">AI Assistant Editor</span>
-                <h3 className="text-3xl font-serif italic text-brand-teal">Regenerate Day {selectedRegenDay}</h3>
+                <h3 className="text-2xl sm:text-3xl font-serif italic text-brand-teal">Regenerate Day {selectedRegenDay}</h3>
                 <p className="text-xs text-brand-teal/40 italic font-light">Custom tune this day’s schedule to match your team’s latest feedback.</p>
               </div>
 
               {regeneratingLoading ? (
                 // LOADING STATE
-                <div className="py-12 flex flex-col items-center justify-center text-center space-y-6">
+                <div className="p-8 flex-1 flex flex-col items-center justify-center text-center space-y-6">
                   <div className="relative">
                     <div className="w-16 h-16 border-4 border-brand-teal/10 border-t-brand-coral rounded-full animate-spin" />
                     <Sparkles className="w-6 h-6 text-brand-coral absolute inset-0 m-auto animate-pulse" />
@@ -2063,180 +2078,183 @@ export default function TripDetailsPage() {
                 </div>
               ) : (
                 // FORM STATE
-                <div className="space-y-6">
-                  {/* Error Notification */}
-                  {regenError && (
-                    <div className="p-4 bg-brand-coral/5 border border-brand-coral/20 rounded-2xl flex items-start gap-3">
-                      <AlertCircle className="w-5 h-5 text-brand-coral shrink-0 mt-0.5" />
-                      <div className="space-y-2">
-                        <p className="text-xs font-semibold text-brand-teal">{regenError}</p>
-                        {regenAttempts[selectedRegenDay] === 1 && (
-                          <button
-                            onClick={handleRegenerateDaySubmit}
-                            className="bg-brand-coral text-white text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg hover:bg-brand-coral/90 transition-all"
-                          >
-                            Try Again
-                          </button>
-                        )}
+                <div className="flex-1 flex flex-col min-h-0 bg-white">
+                  {/* Scrollable Content Container */}
+                  <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6">
+                    {/* Error Notification */}
+                    {regenError && (
+                      <div className="p-4 bg-brand-coral/5 border border-brand-coral/20 rounded-2xl flex items-start gap-3">
+                        <AlertCircle className="w-5 h-5 text-brand-coral shrink-0 mt-0.5" />
+                        <div className="space-y-2">
+                          <p className="text-xs font-semibold text-brand-teal">{regenError}</p>
+                          {regenAttempts[selectedRegenDay] === 1 && (
+                            <button
+                              onClick={handleRegenerateDaySubmit}
+                              className="bg-brand-coral text-white text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg hover:bg-brand-coral/90 transition-all"
+                            >
+                              Try Again
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    )}
 
-                  {/* SECTION 1: REMOVE SPECIFIC ACTIVITIES */}
-                  <div className="space-y-3">
-                    <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
-                      Remove specific activities (optional)
-                    </span>
-                    <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                      {currentDayActivities.map((act: any, idx: number) => {
-                        const isChecked = activitiesToRemove.includes(idx);
-                        return (
-                          <div
-                            key={idx}
-                            onClick={() => {
-                              setActivitiesToRemove(prev => {
-                                const exists = prev.includes(idx);
-                                const updated = exists ? prev.filter(i => i !== idx) : [...prev, idx];
-                                if (updated.length !== currentDayActivities.length) {
-                                  setRegenWarningAllRemoved(false);
-                                }
-                                return updated;
-                              });
-                            }}
-                            className={`flex items-center gap-3 p-3 text-left cursor-pointer rounded-2xl border transition-all ${
-                              isChecked
-                                ? "bg-[#FFE5E5] border-red-200"
-                                : "bg-brand-sand/10 border-brand-teal/5 hover:bg-brand-sand/20 hover:border-brand-teal/15"
-                            }`}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => {}} // toggled by outer onClick card click
-                              className="w-4 h-4 rounded text-brand-coral border-brand-teal/20 focus:ring-brand-coral shrink-0"
-                            />
-                            <div className="min-w-0 flex-1">
-                              <div className={`text-xs font-bold leading-tight ${isChecked ? "text-red-900 line-through" : "text-brand-teal"}`}>
-                                {act.venue_name || act.name}
-                              </div>
-                               <div className="flex flex-wrap items-center gap-2 mt-1 text-[10px] text-brand-teal/40">
-                                ${(act.start_time || act.time) && (
-                                  <span>{act.start_time || act.time}</span>
-                                )}
-                                {(act.duration_minutes !== undefined || act.duration) && (
-                                  <>
-                                    <span>•</span>
-                                    <span>{act.duration_minutes !== undefined ? `${act.duration_minutes}m` : act.duration}</span>
-                                  </>
-                                )}
-                                {(act.estimated_cost_usd !== undefined || act.cost) && (
-                                  <>
-                                    <span>•</span>
-                                    <span>
-                                      ${(Number(act.estimated_cost_usd ?? act.cost) / groupSize).toFixed(2)}/person
-                                    </span>
-                                  </>
-                                )}
+                    {/* SECTION 1: REMOVE SPECIFIC ACTIVITIES */}
+                    <div className="space-y-3">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
+                        Remove specific activities (optional)
+                      </span>
+                      <div className="space-y-2">
+                        {currentDayActivities.map((act: any, idx: number) => {
+                          const isChecked = activitiesToRemove.includes(idx);
+                          return (
+                            <div
+                              key={idx}
+                              onClick={() => {
+                                setActivitiesToRemove(prev => {
+                                  const exists = prev.includes(idx);
+                                  const updated = exists ? prev.filter(i => i !== idx) : [...prev, idx];
+                                  if (updated.length !== currentDayActivities.length) {
+                                    setRegenWarningAllRemoved(false);
+                                  }
+                                  return updated;
+                                });
+                              }}
+                              className={`flex items-center gap-3 p-3 text-left cursor-pointer rounded-2xl border transition-all ${
+                                isChecked
+                                  ? "bg-[#FFE5E5] border-red-200"
+                                  : "bg-brand-sand/10 border-brand-teal/5 hover:bg-brand-sand/20 hover:border-brand-teal/15"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {}} // toggled by outer onClick card click
+                                className="w-4 h-4 rounded text-brand-coral border-brand-teal/20 focus:ring-brand-coral shrink-0"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className={`text-xs font-bold leading-tight ${isChecked ? "text-red-900 line-through" : "text-brand-teal"}`}>
+                                  {act.venue_name || act.name}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 mt-1 text-[10px] text-brand-teal/40">
+                                  ${(act.start_time || act.time) && (
+                                    <span>{act.start_time || act.time}</span>
+                                  )}
+                                  {(act.duration_minutes !== undefined || act.duration) && (
+                                    <>
+                                      <span className="hidden sm:inline">•</span>
+                                      <span className="hidden sm:inline">{act.duration_minutes !== undefined ? `${act.duration_minutes}m` : act.duration}</span>
+                                    </>
+                                  )}
+                                  {(act.estimated_cost_usd !== undefined || act.cost) && (
+                                    <>
+                                      <span>•</span>
+                                      <span>
+                                        ${(Number(act.estimated_cost_usd ?? act.cost) / groupSize).toFixed(2)}/person
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Dynamic Confirmation Warning Box */}
-                  {regenWarningAllRemoved && (
-                    <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-[11px] text-red-700 italic font-medium leading-relaxed">
-                      ⚠️ You're removing all activities. At least one must remain or be generated. Regenerate to get a fresh day.
-                    </div>
-                  )}
-
-                  {/* SECTION 2: CHIPS & CUSTOM CONSTRAINTS */}
-                  <div className="border-t border-brand-teal/5 pt-4 space-y-4">
-                    {/* Add more activities picker */}
-                    <div className="bg-brand-sand/15 p-4 rounded-2xl border border-brand-teal/5 space-y-3">
-                      <div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
-                          Add more activities (optional)
-                        </span>
-                        <span className="text-[11px] text-brand-teal/50 font-medium mt-1 block">
-                          Currently {currentDayActivities.length - activitiesToRemove.length} active + {additionalActivities} new = {currentDayActivities.length - activitiesToRemove.length + additionalActivities} total activities
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-center gap-2">
-                        {[0, 1, 2, 3, 4, 5].map((num) => {
-                          const active = additionalActivities === num;
-                          return (
-                            <button
-                              key={num}
-                              type="button"
-                              onClick={() => setAdditionalActivities(num)}
-                              className={`w-9 h-9 rounded-xl text-xs font-black transition-all flex items-center justify-center border ${
-                                active
-                                  ? "bg-brand-coral text-white border-brand-coral shadow-md shadow-brand-coral/15"
-                                  : "bg-white text-brand-teal border-brand-teal/10 hover:border-brand-teal/25"
-                              }`}
-                            >
-                              +{num}
-                            </button>
-                          );
-                        })}
-                        <span className="text-[11px] text-brand-teal/40 italic font-medium ml-2">
-                          {additionalActivities === 0 ? "No extra" : `${additionalActivities} additional`}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Free-text instructions */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-brand-teal/40">
-                        <span>What should be different about this day?</span>
-                        <span>{regenText.length}/200</span>
-                      </div>
-                      <textarea
-                        value={regenText}
-                        onChange={(e) => setRegenText(e.target.value.substring(0, 200))}
-                        placeholder="e.g., cheaper options, more food, less walking, indoor activities..."
-                        rows={2}
-                        className="w-full bg-brand-sand/35 border border-brand-teal/15 focus:border-brand-coral focus:ring-1 focus:ring-brand-coral rounded-2xl p-4 text-sm text-brand-teal outline-none transition-all placeholder:text-brand-teal/20"
-                      />
-                    </div>
-
-                    {/* Shortcut Chips */}
-                    <div className="space-y-3">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">Select Shortcut Chips</span>
-                      <div className="flex flex-wrap gap-2">
-                        {[
-                          { label: "Cheaper options", value: "cheaper options" },
-                          { label: "More food focus", value: "more food focus" },
-                          { label: "Less walking", value: "less walking" },
-                          { label: "Indoor alternatives", value: "indoor alternatives" },
-                          { label: "More adventure", value: "more adventure" }
-                        ].map((chip) => {
-                          const active = regenChips.includes(chip.value);
-                          return (
-                            <button
-                              key={chip.value}
-                              type="button"
-                              onClick={() => handleChipToggle(chip.value)}
-                              className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
-                                active
-                                  ? "bg-brand-coral text-white border-brand-coral shadow-lg shadow-brand-coral/15"
-                                  : "bg-brand-sand/15 text-brand-teal border-brand-teal/10 hover:border-brand-teal/30"
-                              }`}
-                            >
-                              {chip.label}
-                            </button>
                           );
                         })}
                       </div>
                     </div>
+
+                    {/* Dynamic Confirmation Warning Box */}
+                    {regenWarningAllRemoved && (
+                      <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-[11px] text-red-700 italic font-medium leading-relaxed">
+                        ⚠️ You're removing all activities. At least one must remain or be generated. Regenerate to get a fresh day.
+                      </div>
+                    )}
+
+                    {/* SECTION 2: CHIPS & CUSTOM CONSTRAINTS */}
+                    <div className="border-t border-brand-teal/5 pt-4 space-y-4">
+                      {/* Add more activities picker */}
+                      <div className="bg-brand-sand/15 p-4 rounded-2xl border border-brand-teal/5 space-y-3">
+                        <div>
+                          <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">
+                            Add more activities (optional)
+                          </span>
+                          <span className="text-[11px] text-brand-teal/50 font-medium mt-1 block">
+                            Currently {currentDayActivities.length - activitiesToRemove.length} active + {additionalActivities} new = {currentDayActivities.length - activitiesToRemove.length + additionalActivities} total activities
+                          </span>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-2">
+                          {[0, 1, 2, 3, 4, 5].map((num) => {
+                            const active = additionalActivities === num;
+                            return (
+                              <button
+                                key={num}
+                                type="button"
+                                onClick={() => setAdditionalActivities(num)}
+                                className={`w-9 h-9 rounded-xl text-xs font-black transition-all flex items-center justify-center border ${
+                                  active
+                                    ? "bg-brand-coral text-white border-brand-coral shadow-md shadow-brand-coral/15"
+                                    : "bg-white text-brand-teal border-brand-teal/10 hover:border-brand-teal/25"
+                                }`}
+                              >
+                                +{num}
+                              </button>
+                            );
+                          })}
+                          <span className="text-[11px] text-brand-teal/40 italic font-medium ml-2">
+                            {additionalActivities === 0 ? "No extra" : `${additionalActivities} additional`}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Free-text instructions */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-brand-teal/40">
+                          <span>What should be different about this day?</span>
+                          <span>{regenText.length}/200</span>
+                        </div>
+                        <textarea
+                          value={regenText}
+                          onChange={(e) => setRegenText(e.target.value.substring(0, 200))}
+                          placeholder="e.g., cheaper options, more food, less walking, indoor activities..."
+                          rows={2}
+                          className="w-full bg-brand-sand/35 border border-brand-teal/15 focus:border-brand-coral focus:ring-1 focus:ring-brand-coral rounded-2xl p-4 text-sm text-brand-teal outline-none transition-all placeholder:text-brand-teal/20"
+                        />
+                      </div>
+
+                      {/* Shortcut Chips */}
+                      <div className="space-y-3">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-brand-teal/40 block">Select Shortcut Chips</span>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            { label: "Cheaper options", value: "cheaper options" },
+                            { label: "More food focus", value: "more food focus" },
+                            { label: "Less walking", value: "less walking" },
+                            { label: "Indoor alternatives", value: "indoor alternatives" },
+                            { label: "More adventure", value: "more adventure" }
+                          ].map((chip) => {
+                            const active = regenChips.includes(chip.value);
+                            return (
+                              <button
+                                key={chip.value}
+                                type="button"
+                                onClick={() => handleChipToggle(chip.value)}
+                                className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                                  active
+                                    ? "bg-brand-coral text-white border-brand-coral shadow-lg shadow-brand-coral/15"
+                                    : "bg-brand-sand/15 text-brand-teal border-brand-teal/10 hover:border-brand-teal/30"
+                                }`}
+                              >
+                                {chip.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
-                  {/* Footer Action Buttons */}
-                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-brand-teal/5">
+                  {/* Fixed Footer Action Buttons */}
+                  <div className="p-6 sm:p-8 pt-4 border-t border-brand-teal/5 bg-white shrink-0 flex items-center justify-end gap-3 w-full mt-auto">
                     <button
                       type="button"
                       onClick={() => {

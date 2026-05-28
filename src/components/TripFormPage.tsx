@@ -274,20 +274,27 @@ export default function TripFormPage() {
 
   return (
     <div className="min-h-screen bg-brand-sand pb-20 selection:bg-brand-coral/20">
-      <div className="max-w-3xl mx-auto px-6 pt-12 flex items-center justify-between sticky top-0 bg-brand-sand/80 backdrop-blur-md z-[60] py-4 mb-8">
-        <motion.button 
-          whileHover={{ x: -4 }}
-          onClick={() => navigate("/")} 
-          className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.2em] text-brand-teal/40 hover:text-brand-coral transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" /> Cancel
-        </motion.button>
-        <div className="flex flex-col items-center">
+      <div className="max-w-3xl mx-auto px-6 pt-6 sm:pt-12 flex flex-col sm:grid sm:grid-cols-3 sm:items-center justify-between sticky top-0 bg-brand-sand/80 backdrop-blur-md z-[60] py-4 mb-8">
+        <div className="flex sm:justify-start items-center justify-between w-full sm:w-auto mb-2 sm:mb-0">
+          <motion.button 
+            whileHover={{ x: -4 }}
+            onClick={() => navigate("/")} 
+            className="flex items-center gap-2 text-xs font-black uppercase tracking-[0.2em] text-brand-teal/40 hover:text-brand-coral transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" /> Cancel
+          </motion.button>
+
+          {/* Mobile version badge */}
+          <span className="sm:hidden text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.7</span>
+        </div>
+
+        <div className="flex flex-col items-center text-center">
           <span className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-teal/20">Planning Mode</span>
           <span className="text-sm font-serif italic text-brand-teal">Your Next Adventure</span>
         </div>
-        <div className="text-right">
-          <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.6</span>
+
+        <div className="hidden sm:block text-right">
+          <span className="text-[10px] font-black uppercase tracking-widest text-[#6B7785]/80">v1.7</span>
         </div>
       </div>
 

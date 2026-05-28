@@ -100,7 +100,7 @@ export default function LandingPage() {
               <Plane className="w-5 h-5 text-white" />
             </div>
             <span className="text-2xl font-bold tracking-tight text-brand-teal">
-              travlly<span className="text-[17px] font-bold tracking-normal text-brand-teal/60 ml-0.5 leading-[28px] text-justify bg-transparent">1.6</span>
+              travlly<span className="text-[17px] font-bold tracking-normal text-brand-teal/60 ml-0.5 leading-[28px] text-justify bg-transparent">1.7</span>
             </span>
           </div>
           <div className="flex items-center gap-6">

@@ -10,7 +10,7 @@ export default function Footer() {
         </Link>
       </div>
       <div className="text-left sm:text-right font-bold tracking-widest text-[#6B7785]/60 pr-2">
-        v1.6
+        v1.7
       </div>
     </footer>
   );
